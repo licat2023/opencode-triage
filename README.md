@@ -3,6 +3,31 @@
 > Deterministic skill router for OpenCode. Saves ~94% tokens by keeping skills
 > out of the system prompt and routing via keyword matching instead of LLM reasoning.
 
+## Mental Model
+
+Skills are specialized instructions loaded into the system prompt. Normally, **all** skills are visible and consume tokens on every message — even when irrelevant.
+
+Triage flips this: skills are hidden from the system prompt and fetched **on demand** via a `triage()` tool the LLM calls when it needs help.
+
+```
+No triage:   [skill A] [skill B] [skill C] ...  ← all in prompt, always burning tokens
+With triage: triage({ query }) → finds the right skill → returns it only when needed
+```
+
+**The lifecycle of a skill:**
+
+```
+SKILL.md                    SKILL.md.disabled
+  │                              │
+  │  exposed in prompt           │  hidden from prompt
+  │  cost: ~50 tokens/msg        │  cost: 0 tokens/msg
+  │                              │
+  └─── /triage on ──────────────▶
+  ◀─── /triage off ─────────────┘
+```
+
+The LLM calls `triage()` when it encounters a task it can't handle with general knowledge. The plugin scores installed skills against the query using keyword matching and returns the best match. No skills in the prompt, no LLM guessing across a long list, and no wasted tokens.
+
 ## LLM Quick-Install
 
 Copy-paste this into any LLM:
@@ -11,23 +36,23 @@ Copy-paste this into any LLM:
 Install opencode-triage — a deterministic skill router for OpenCode.
 
 1. Read https://github.com/cascharly/opencode-triage/blob/main/src/index.ts and write it to .opencode/plugins/triage.ts
-2. Read https://github.com/cascharly/opencode-triage/blob/main/cli.js and write it to .opencode/plugins/triage-cli.js
+2. Read https://github.com/cascharly/opencode-triage/blob/main/cli.cjs and write it to .opencode/plugins/triage-cli.cjs
 3. Open .opencode/opencode.json and add "triage" to the "plugin" array
 4. Create .opencode/commands/triage.md with this content:
    ---
    description: Toggle, inspect, and benchmark the triage skill router
    ---
-   Run node .opencode/plugins/triage-cli.js $ARGUMENTS and show the output verbatim.
+   Run node .opencode/plugins/triage-cli.cjs $ARGUMENTS and show the output verbatim.
    If output contains "Restart opencode", tell the user to restart.
-5. Run: node .opencode/plugins/triage-cli.js on
+5. Run: node .opencode/plugins/triage-cli.cjs on
 6. Tell me to restart opencode.
 ```
 
 ## Features
 
-- **94% token savings** — skills hidden from system prompt, routed on demand
-- **Deterministic matching** — keyword scoring, not LLM guessing across a long list
-- **Zero side effects** — read-only plugin, never modifies your skill files
+- **94% token savings** — skills removed from system prompt, zero token cost on every idle message
+- **Deterministic routing** — same query always returns the same skill, no hallucinated names or wrong routes
+- **Zero overhead when idle** — skills don't exist until `triage()` is called, no cost until you need one
 - **Cross-platform** — macOS, Linux, Windows (native + WSL)
 - **One-click uninstall** — `/triage off` restores everything to native
 
@@ -51,7 +76,7 @@ OpenCode auto-installs it via Bun on restart. Then run:
 
 ### Manual
 
-Copy `triage.ts` and `triage-cli.js` into `.opencode/plugins/`, `triage.md` into `.opencode/commands/`, and add `"triage"` to the plugin array.
+Copy `triage.ts` and `triage-cli.cjs` into `.opencode/plugins/`, `triage.md` into `.opencode/commands/`, and add `"triage"` to the plugin array.
 
 ## Commands
 

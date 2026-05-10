@@ -84,7 +84,7 @@ export const TriagePlugin: Plugin = async ({ directory }) => ({
 
         const query = (args.query ?? "").trim()
         if (!query) {
-          return formatAll(skills)
+          return "Describe what you need — triage will find the best matching skill."
         }
 
         const scored = scoreSkills(query, skills)
@@ -92,7 +92,7 @@ export const TriagePlugin: Plugin = async ({ directory }) => ({
           .sort((a, b) => b.score - a.score)
 
         if (scored.length === 0) {
-          return `No skill matches "${query}".\n\n${formatAll(skills)}`
+          return `No skill matches "${query}". Try different keywords.`
         }
 
         const gap = scored[0].score - (scored[1]?.score ?? 0)
@@ -174,11 +174,11 @@ async function tryReadSkill(
 }
 
 function extractFrontmatter(content: string, key: string): string | null {
-  const match = content.match(/^---\n([\s\S]*?)\n---/)
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
   if (!match) return null
   const fm = match[1]
 
-  const multiRe = new RegExp(`^${key}:\\s*>(.+?)(?=\\n\\S|$)`, "sm")
+  const multiRe = new RegExp(`^${key}:\\s*>(.+?)(?=\\r?\\n\\S|$)`, "sm")
   const multiMatch = fm.match(multiRe)
   if (multiMatch) {
     return multiMatch[1].replace(/\n\s*/g, " ").trim()
@@ -228,23 +228,10 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
-// ── Formatting ────────────────────────────────────────────
-
-function formatAll(skills: SkillEntry[]): string {
-  const lines = ["Available skills:", ""]
-  for (const s of skills) {
-    const scope = s.scope === "global" ? "[global]" : "[project]"
-    lines.push(`${scope} ${s.name} — ${s.desc}`)
-  }
-  lines.push("")
-  lines.push(`Call triage({ query: "brief description" }) to search.`)
-  return lines.join("\n")
-}
-
 async function readSkillContent(filePath: string): Promise<string> {
   try {
     const content = await readFile(filePath, "utf-8")
-    const bodyMatch = content.match(/^---\n[\s\S]*?\n---\n*([\s\S]*)/)
+    const bodyMatch = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n*([\s\S]*)/)
     return bodyMatch ? bodyMatch[1].trim() : content.trim()
   } catch {
     return "(skill content unavailable)"

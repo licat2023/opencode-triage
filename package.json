@@ -17,11 +17,11 @@
   "type": "module",
   "main": "src/index.ts",
   "bin": {
-    "opencode-triage": "./cli.js"
+    "opencode-triage": "./cli.cjs"
   },
   "files": [
     "src/",
-    "cli.js",
+    "cli.cjs",
     "README.md"
   ],
   "scripts": {
@@ -49,5 +49,9 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "devDependencies": {
+    "@types/node": "25.6.2",
+    "typescript": "6.0.3"
   }
 }
