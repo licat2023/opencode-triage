@@ -111,6 +111,67 @@ Plugin: scans filesystem → scores skills against query
 Plugin: returns matched skill content directly
 ```
 
+## User Flow
+
+Here's what a typical session looks like with opencode-triage enabled:
+
+**1. Session starts** — all skills are hidden from the system prompt. Zero token overhead.
+
+**2. General question — no skills needed:**
+
+```
+User: "What does this function do?"
+```
+
+The LLM answers with its general knowledge. No triage call fires. Zero extra tokens spent.
+
+**3. Specialized task — clear match:**
+
+```
+User: "Backup my PostgreSQL database to S3"
+```
+
+The LLM recognizes this needs specialized knowledge and calls:
+
+```
+triage({ query: "Backup my PostgreSQL database to S3" })
+```
+
+The plugin scores all hidden skills:
+
+```
+backup-restore     score=60  (name:backup, desc:database)
+database-sync      score=25  (desc:database)
+webhook-automation score=0   (no match)
+```
+
+Gap = 35 ≥ threshold (30) → **high confidence**. The plugin returns the `backup-restore` skill content directly. The LLM now has the exact instructions it needs.
+
+**4. Ambiguous task — multiple candidates:**
+
+```
+User: "Set up the database"
+```
+
+Multiple skills match with similar scores:
+
+```
+backup-restore     score=30  (desc:database)
+database-sync      score=30  (name:database)
+```
+
+Gap = 0 < threshold → **ambiguous**. The plugin returns the top candidates:
+
+```
+Multiple matches for "Set up the database". Pick one:
+1. backup-restore — Backup and restore databases
+2. database-sync — Synchronize databases across servers
+
+Example: triage({ query: "backup-restore" })
+```
+
+The LLM picks the right one based on context and calls triage again with the skill name.
+
 ## Token Savings
 
 This is where opencode-triage delivers the most value. Every message without triage burns tokens on skills you don't need. With triage, you only pay for the skill you actually use.
