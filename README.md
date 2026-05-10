@@ -1,13 +1,13 @@
 # opencode-triage
 
-> Deterministic skill router for OpenCode. Saves ~94% tokens by keeping skills
+> Deterministic skill router for OpenCode. Save OpenCode tokens by keeping skills
 > out of the system prompt and routing via keyword matching instead of LLM reasoning.
 
 ## Mental Model
 
-Skills are specialized instructions loaded into the system prompt. Normally, **all** skills are visible and consume tokens on every message — even when irrelevant.
+Skills are specialized instructions loaded into the system prompt. Normally, **all** skills are visible and consume tokens on every message — even when irrelevant. This is the biggest source of wasted tokens in OpenCode's AI coding agent workflow.
 
-Triage flips this: skills are hidden from the system prompt and fetched **on demand** via a `triage()` tool the LLM calls when it needs help.
+Triage flips this: skills are hidden from the system prompt and fetched **on demand** via a `triage()` tool the LLM calls when it needs help. Reduce OpenCode token usage by up to 94% with zero impact on capability.
 
 ```
 No triage:   [skill A] [skill B] [skill C] ...  ← all in prompt, always burning tokens
@@ -26,7 +26,7 @@ SKILL.md                    SKILL.md.disabled
   ◀─── /triage off ─────────────┘
 ```
 
-The LLM calls `triage()` when it encounters a task it can't handle with general knowledge. The plugin scores installed skills against the query using keyword matching and returns the best match. No skills in the prompt, no LLM guessing across a long list, and no wasted tokens.
+The LLM calls `triage()` when it encounters a task it can't handle with general knowledge. The plugin scores installed skills against the query using keyword matching and returns the best match. No skills in the prompt, no LLM guessing across a long list, and no wasted tokens. This is the most effective OpenCode token optimization available.
 
 ## LLM Quick-Install
 
@@ -50,15 +50,18 @@ Install opencode-triage — a deterministic skill router for OpenCode.
 
 ## Features
 
-- **94% token savings** — skills removed from system prompt, zero token cost on every idle message
+- **94% token savings** — save OpenCode tokens by removing skills from the system prompt, zero token cost on every idle message
 - **Deterministic routing** — same query always returns the same skill, no hallucinated names or wrong routes
 - **Zero overhead when idle** — skills don't exist until `triage()` is called, no cost until you need one
 - **Cross-platform** — macOS, Linux, Windows (native + WSL)
 - **One-click uninstall** — `/triage off` restores everything to native
+- **Open source & free** — MIT license, install via npm with zero dependencies beyond OpenCode itself
 
 ## Install
 
 ### npm (recommended)
+
+The fastest way to reduce OpenCode token usage — install the opencode-triage plugin and hide all skills from the system prompt in seconds.
 
 Add to `.opencode/opencode.json`:
 
@@ -90,7 +93,7 @@ Copy `opencode-triage.ts` into `.opencode/plugins/`, `triage-cli.cjs` into `.ope
 
 ## How it works
 
-Skills remain as standard `SKILL.md` files with YAML frontmatter. The `.disabled` suffix hides them from OpenCode's native discovery. The triage plugin scans the filesystem directly and routes queries via keyword scoring.
+Skills remain as standard `SKILL.md` files with YAML frontmatter. The `.disabled` suffix hides them from OpenCode's native discovery. The triage plugin scans the filesystem directly and routes queries via keyword scoring — no LLM reasoning overhead, no extra API calls, just fast deterministic matching.
 
 ```
 User: "backup my database"
@@ -110,6 +113,8 @@ Plugin: returns matched skill content directly
 
 ## Token Savings
 
+This is where opencode-triage delivers the most value. Every message without triage burns tokens on skills you don't need. With triage, you only pay for the skill you actually use.
+
 | | Without Triage | With Triage |
 |---|---|---|
 | System prompt (per msg, 20 skills) | ~1,000 | ~40 |
@@ -117,7 +122,7 @@ Plugin: returns matched skill content directly
 | Session total (10 msgs, 5 lookups) | ~11,050 | ~675 |
 | **Savings** | — | **94%** |
 
-Run `/triage compare` for live numbers based on your skill inventory.
+Run `/triage compare` for live numbers based on your skill inventory. The more skills you have, the more tokens you save with opencode-triage.
 
 ## Discovery Paths
 
@@ -139,7 +144,7 @@ The plugin scans both `.md` and `.disabled` skill files in:
 <restart opencode>
 ```
 
-Remove `"opencode-triage"` from `opencode.json`. Zero residue.
+Remove `"opencode-triage"` from `opencode.json`. Zero residue. All skills work natively again.
 
 ## Compatibility
 
