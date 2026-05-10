@@ -17,16 +17,17 @@
   "type": "module",
   "main": "src/index.ts",
   "bin": {
-    "opencode-triage": "./cli.cjs"
+    "opencode-triage": "./bin/opencode-triage.cjs"
   },
   "files": [
     "src/",
-    "cli.cjs",
+    "bin/",
     "README.md"
   ],
   "scripts": {
     "check": "tsc --noEmit",
-    "prepublishOnly": "echo 'Ready to publish'"
+    "test": "node --experimental-strip-types --test test/**/*.test.ts",
+    "prepublishOnly": "npm run check && npm run test"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.14.0"

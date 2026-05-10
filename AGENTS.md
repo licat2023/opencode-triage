@@ -6,7 +6,7 @@ Deterministic skill router for OpenCode. Published as `opencode-triage` on npm.
 
 ## Entrypoints
 
-- **Plugin** (`src/index.ts`) — exports `TriagePlugin`, consumed by OpenCode Bun runtime. No build step.
+- **Plugin** (`src/index.ts`) — exports `server`, consumed by OpenCode Bun runtime. No build step.
 - **CLI** (`cli.cjs`) — standalone Node.js script for user commands.
 
 ## Commands
@@ -27,8 +27,8 @@ No test runner, no linter, no formatter config. No tsconfig.json in repo.
 
 ## CLI behavior
 
-- `/triage on` — renames `SKILL.md` → `SKILL.md.disabled` (hides skills), adds `"triage"` to `opencode.json` plugin array
-- `/triage off` — renames `SKILL.md.disabled` → `SKILL.md` (exposes skills), removes `"triage"` from plugin array
+- `/triage on` — renames `SKILL.md` → `SKILL.md.disabled` (hides skills), adds `"opencode-triage"` to `opencode.json` plugin array
+- `/triage off` — renames `SKILL.md.disabled` → `SKILL.md` (exposes skills), removes `"opencode-triage"` from plugin array
 - Always requires restart after toggle
 
 ## Publishing

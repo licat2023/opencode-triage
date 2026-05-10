@@ -16,8 +16,8 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import { homedir } from "node:os"
-import { join, basename } from "node:path"
-import { readdir, readFile, access } from "node:fs/promises"
+import { join, basename, sep } from "node:path"
+import { readdir, readFile, realpath } from "node:fs/promises"
 
 // ── Configuration ──────────────────────────────────────────
 
@@ -53,76 +53,91 @@ function buildSkillLocations(worktree: string) {
 
 // ── Plugin ────────────────────────────────────────────────
 
-export const TriagePlugin: Plugin = async ({ directory }) => ({
-  tool: {
-    triage: tool({
-      description:
-        "Discover and route to the right specialized skill. " +
-        "Call this before any non-trivial task. " +
-        "Pass a brief description. Returns the best match or a list of candidates.",
-      args: {
-        query: tool.schema.string().optional().describe(
-          "Brief description of what you need help with, e.g. 'backup my database'"
-        ),
-      },
-      async execute(args) {
-        const worktree = directory
-        const skillLocations = buildSkillLocations(worktree)
-        const skills = await discoverAllSkills(skillLocations)
+export const server: Plugin = async ({ worktree }) => {
+  // Cache: discovered skills per worktree
+  let cache: SkillEntry[] | null = null
 
-        if (skills.length === 0) {
-          return [
-            "No skills installed.",
-            "",
-            "To add a skill:",
-            "  .opencode/skills/<name>/SKILL.md",
-            "  .agent/skills/<name>/SKILL.md",
-            "",
-            "Use /triage status to verify your setup.",
-          ].join("\n")
-        }
+  async function getCachedSkills(): Promise<SkillEntry[]> {
+    if (cache === null) {
+      const locations = buildSkillLocations(worktree)
+      cache = await discoverAllSkills(locations)
+    }
+    return cache
+  }
 
-        const query = (args.query ?? "").trim()
-        if (!query) {
-          return "Describe what you need — triage will find the best matching skill."
-        }
+  return {
+    tool: {
+      triage: tool({
+        description:
+          "Discover and route to the right specialized skill. " +
+          "Call this before any non-trivial task. " +
+          "Pass a brief description. Returns the best match or a list of candidates.",
+        args: {
+          query: tool.schema.string().optional().describe(
+            "Brief description of what you need help with, e.g. 'backup my database'"
+          ),
+        },
+        async execute(args, context) {
+          const skills = await getCachedSkills()
 
-        const scored = scoreSkills(query, skills)
-          .filter(s => s.score > 0)
-          .sort((a, b) => b.score - a.score)
+          if (skills.length === 0) {
+            return [
+              "No skills installed.",
+              "",
+              "To add a skill:",
+              "  .opencode/skills/<name>/SKILL.md",
+              "  .agent/skills/<name>/SKILL.md",
+              "",
+              "Use /triage status to verify your setup.",
+            ].join("\n")
+          }
 
-        if (scored.length === 0) {
-          return `No skill matches "${query}". Try different keywords.`
-        }
+          const query = (args.query ?? "").trim()
+          if (!query) {
+            return "Describe what you need -- triage will find the best matching skill."
+          }
 
-        const gap = scored[0].score - (scored[1]?.score ?? 0)
+          if (context.abort.aborted) {
+            return "Triage cancelled."
+          }
 
-        if (gap >= THRESHOLD || scored.length === 1) {
-          const match = scored[0]
-          const content = await readSkillContent(match.path)
-          return [
-            `SKILL ROUTED: ${match.name}`,
-            `Matched by: ${match.matchedBy}`,
+          const scored = scoreSkills(query, skills)
+            .filter(s => s.score > 0)
+            .sort((a, b) => b.score - a.score)
+
+          if (scored.length === 0) {
+            return `No skill matches "${query}". Try different keywords.`
+          }
+
+          const gap = scored[0].score - (scored[1]?.score ?? 0)
+
+          if (gap >= THRESHOLD || scored.length === 1) {
+            const match = scored[0]
+            const content = await readSkillContent(match.path)
+            return [
+              `SKILL ROUTED: ${match.name}`,
+              `Matched by: ${match.matchedBy}`,
+              ``,
+              content,
+            ].join("\n")
+          }
+
+          const top = scored.slice(0, 5)
+          const lines = [
+            `Multiple matches for "${query}". Pick one and call triage with the skill name:`,
             ``,
-            content,
-          ].join("\n")
-        }
-
-        const top = scored.slice(0, 5)
-        const lines = [
-          `Multiple matches for "${query}". Pick one and call triage with the skill name:`,
-          ``,
-        ]
-        top.forEach((s, i) => {
-          lines.push(`${i + 1}. ${s.name} — ${s.desc}`)
-        })
-        lines.push(``)
-        lines.push(`Example: triage({ query: "${top[0].name}" })`)
-        return lines.join("\n")
-      },
-    }),
-  },
-})
+          ]
+          top.forEach((s, i) => {
+            lines.push(`${i + 1}. ${s.name} -- ${s.desc}`)
+          })
+          lines.push(``)
+          lines.push(`Example: triage({ query: "${top[0].name}" })`)
+          return lines.join("\n")
+        },
+      }),
+    },
+  }
+}
 
 // ── Discovery ─────────────────────────────────────────────
 
@@ -134,24 +149,30 @@ async function discoverAllSkills(
 
   for (const { base, scope } of locations) {
     try {
-      await access(base)
-      const entries = await readdir(base, { withFileTypes: true })
+      const resolvedBase = await realpath(base)
+      const entries = await readdir(resolvedBase, { withFileTypes: true })
       for (const entry of entries) {
         if (!entry.isDirectory()) continue
+        if (entry.isSymbolicLink()) continue
         if (EXCLUDED_SKILLS.has(entry.name)) continue
+        if (entry.name.includes(sep) || entry.name === ".." || entry.name === ".") continue
 
-        const result = await tryReadSkill(join(base, entry.name))
+        const result = await tryReadSkill(join(resolvedBase, entry.name))
         if (result && !seen.has(result.name)) {
           seen.add(result.name)
           skills.push({ ...result, scope })
         }
       }
-    } catch { /* directory missing — skip */ }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`[opencode-triage] Error scanning ${base}:`, err)
+      }
+    }
   }
 
   skills.sort((a, b) => {
     if (a.scope !== b.scope) return a.scope === "project" ? -1 : 1
-    return a.name.localeCompare(b.name)
+    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
   })
 
   return skills
@@ -173,10 +194,16 @@ async function tryReadSkill(
   return null
 }
 
+function stripBOM(content: string): string {
+  if (content.charCodeAt(0) === 0xFEFF) return content.slice(1)
+  return content
+}
+
 function extractFrontmatter(content: string, key: string): string | null {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
-  if (!match) return null
-  const fm = match[1]
+  const clean = stripBOM(content)
+  const fmEnd = clean.indexOf("\n---", 4)
+  if (fmEnd === -1) return null
+  const fm = clean.slice(4, fmEnd)
 
   const multiRe = new RegExp(`^${key}:\\s*>(.+?)(?=\\r?\\n\\S|$)`, "sm")
   const multiMatch = fm.match(multiRe)
@@ -194,6 +221,7 @@ function extractFrontmatter(content: string, key: string): string | null {
 function scoreSkills(query: string, skills: SkillEntry[]): ScoredSkill[] {
   const words = query.toLowerCase()
     .split(/\s+/)
+    .map(w => w.replace(/[^\p{L}\p{N}]/gu, ""))
     .filter(w => w.length >= MIN_WORD_LENGTH)
 
   if (words.length === 0) return []
@@ -225,14 +253,20 @@ function getWordBonus(word: string, target: string): number {
 }
 
 function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return s.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")
 }
+
+const MAX_SKILL_SIZE = 1024 * 1024 // 1MB
 
 async function readSkillContent(filePath: string): Promise<string> {
   try {
     const content = await readFile(filePath, "utf-8")
-    const bodyMatch = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n*([\s\S]*)/)
-    return bodyMatch ? bodyMatch[1].trim() : content.trim()
+    if (content.length > MAX_SKILL_SIZE) {
+      return `(skill content truncated: exceeds 1MB limit)`
+    }
+    const clean = stripBOM(content)
+    const bodyMatch = clean.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n*([\s\S]*)/)
+    return bodyMatch ? bodyMatch[1].trim() : clean.trim()
   } catch {
     return "(skill content unavailable)"
   }

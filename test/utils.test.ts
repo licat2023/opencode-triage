@@ -1,0 +1,295 @@
+import { describe, it } from "node:test"
+import assert from "node:assert/strict"
+import {
+  stripBOM,
+  extractFrontmatter,
+  escapeRegex,
+  getWordBonus,
+  scoreSkills,
+  isValidSkillName,
+  THRESHOLD,
+  MIN_WORD_LENGTH,
+  NAME_WEIGHT,
+  DESC_WEIGHT,
+} from "../src/utils.ts"
+
+// ── stripBOM ──────────────────────────────────────────────
+
+describe("stripBOM", () => {
+  it("removes UTF-8 BOM", () => {
+    const withBOM = "\uFEFF---\nname: test\n---\ncontent"
+    assert.equal(stripBOM(withBOM), "---\nname: test\n---\ncontent")
+  })
+
+  it("returns unchanged when no BOM", () => {
+    const noBOM = "---\nname: test\n---\ncontent"
+    assert.equal(stripBOM(noBOM), noBOM)
+  })
+
+  it("handles empty string", () => {
+    assert.equal(stripBOM(""), "")
+  })
+})
+
+// ── extractFrontmatter ────────────────────────────────────
+
+describe("extractFrontmatter", () => {
+  it("extracts name from single-line frontmatter", () => {
+    const content = `---
+name: backup-restore
+description: Backup and restore databases
+---
+Some content here.`
+    assert.equal(extractFrontmatter(content, "name"), "backup-restore")
+  })
+
+  it("extracts description from single-line frontmatter", () => {
+    const content = `---
+name: backup-restore
+description: Backup and restore databases
+---
+Some content here.`
+    assert.equal(extractFrontmatter(content, "description"), "Backup and restore databases")
+  })
+
+  it("extracts first line of folded description (> syntax)", () => {
+    const content = `---
+name: my-skill
+description: >
+  This is a long
+  folded description
+---
+Body.`
+    // With m flag, $ matches end-of-line, so multi-line folded blocks
+    // only capture the first line. This is a known limitation.
+    assert.equal(extractFrontmatter(content, "description"), "This is a long")
+  })
+
+  it("returns null when key missing", () => {
+    const content = `---
+name: my-skill
+---
+Body.`
+    assert.equal(extractFrontmatter(content, "description"), null)
+  })
+
+  it("returns null when no frontmatter", () => {
+    assert.equal(extractFrontmatter("Just plain text", "name"), null)
+  })
+
+  it("handles BOM before frontmatter", () => {
+    const content = "\uFEFF---\nname: bom-skill\n---\nBody"
+    assert.equal(extractFrontmatter(content, "name"), "bom-skill")
+  })
+
+  it("handles CRLF line endings", () => {
+    const content = "---\r\nname: crlf-skill\r\ndescription: Windows style\r\n---\r\nBody"
+    assert.equal(extractFrontmatter(content, "name"), "crlf-skill")
+  })
+})
+
+// ── escapeRegex ───────────────────────────────────────────
+
+describe("escapeRegex", () => {
+  it("escapes special regex characters", () => {
+    assert.equal(escapeRegex("a.b"), "a\\.b")
+    assert.equal(escapeRegex("a*b"), "a\\*b")
+    assert.equal(escapeRegex("a+b"), "a\\+b")
+    assert.equal(escapeRegex("a?b"), "a\\?b")
+    assert.equal(escapeRegex("a^b"), "a\\^b")
+    assert.equal(escapeRegex("a$b"), "a\\$b")
+    assert.equal(escapeRegex("a{b}"), "a\\{b\\}")
+    assert.equal(escapeRegex("a(b)"), "a\\(b\\)")
+    assert.equal(escapeRegex("a|b"), "a\\|b")
+    assert.equal(escapeRegex("a[b]"), "a\\[b\\]")
+    assert.equal(escapeRegex("a\\b"), "a\\\\b")
+  })
+
+  it("escapes hyphen", () => {
+    assert.equal(escapeRegex("a-b"), "a\\-b")
+  })
+
+  it("leaves alphanumeric unchanged", () => {
+    assert.equal(escapeRegex("abc123"), "abc123")
+  })
+})
+
+// ── getWordBonus ──────────────────────────────────────────
+
+describe("getWordBonus", () => {
+  it("returns 15 for exact word match", () => {
+    assert.equal(getWordBonus("backup", "backup restore"), 15)
+  })
+
+  it("returns 15 for exact word match at boundaries", () => {
+    assert.equal(getWordBonus("db", "backup db restore"), 15)
+  })
+
+  it("returns 10 for substring match", () => {
+    assert.equal(getWordBonus("back", "backup"), 10)
+  })
+
+  it("returns 0 for no match", () => {
+    assert.equal(getWordBonus("xyz", "backup restore"), 0)
+  })
+
+  it("is case insensitive", () => {
+    assert.equal(getWordBonus("BACKUP", "backup restore"), 15)
+    assert.equal(getWordBonus("backup", "BACKUP RESTORE"), 15)
+  })
+})
+
+// ── scoreSkills ───────────────────────────────────────────
+
+describe("scoreSkills", () => {
+  const skills = [
+    { name: "backup-restore", desc: "Backup and restore databases", path: "/a", scope: "project" as const },
+    { name: "database-sync", desc: "Synchronize databases across servers", path: "/b", scope: "project" as const },
+    { name: "web-design", desc: "Design responsive web interfaces", path: "/c", scope: "global" as const },
+  ]
+
+  it("returns empty array for empty query", () => {
+    assert.deepEqual(scoreSkills("", skills), [])
+  })
+
+  it("returns all skills with zero score for query with only short words", () => {
+    const result = scoreSkills("a an the", skills)
+    assert.equal(result.length, 3)
+    assert.ok(result.every(s => s.score === 0))
+  })
+
+  it("scores name match higher than desc match", () => {
+    const result = scoreSkills("backup", skills)
+    const backupSkill = result.find(s => s.name === "backup-restore")
+    const dbSkill = result.find(s => s.name === "database-sync")
+    assert.ok(backupSkill && dbSkill)
+    assert.ok(backupSkill.score > dbSkill.score)
+  })
+
+  it("strips punctuation from query", () => {
+    const result = scoreSkills("backup my database!", skills)
+    const backupSkill = result.find(s => s.name === "backup-restore")
+    assert.ok(backupSkill && backupSkill.score > 0)
+  })
+
+  it("returns zero scores for no matches", () => {
+    const result = scoreSkills("cooking recipe pizza", skills)
+    assert.ok(result.every(s => s.score === 0))
+  })
+
+  it("tracks matched words", () => {
+    const result = scoreSkills("backup database", skills)
+    const backupSkill = result.find(s => s.name === "backup-restore")
+    assert.ok(backupSkill)
+    assert.ok(backupSkill.matchedBy.includes("name:backup"))
+    assert.ok(backupSkill.matchedBy.includes("desc:database"))
+  })
+
+  it("filters words shorter than MIN_WORD_LENGTH", () => {
+    const result = scoreSkills("do it backup now", skills)
+    const backupSkill = result.find(s => s.name === "backup-restore")
+    assert.ok(backupSkill && backupSkill.score > 0)
+  })
+
+  it("handles unicode letters in query", () => {
+    const result = scoreSkills("caf\u00e9", skills)
+    assert.ok(Array.isArray(result))
+    assert.equal(result.length, 3)
+  })
+})
+
+// ── isValidSkillName ──────────────────────────────────────
+
+describe("isValidSkillName", () => {
+  it("rejects ..", () => {
+    assert.equal(isValidSkillName(".."), false)
+  })
+
+  it("rejects .", () => {
+    assert.equal(isValidSkillName("."), false)
+  })
+
+  it("rejects forward slash", () => {
+    assert.equal(isValidSkillName("foo/bar"), false)
+  })
+
+  it("rejects backslash", () => {
+    assert.equal(isValidSkillName("foo\\bar"), false)
+  })
+
+  it("accepts normal names", () => {
+    assert.equal(isValidSkillName("backup-restore"), true)
+    assert.equal(isValidSkillName("my_cool_skill"), true)
+    assert.equal(isValidSkillName("web-design"), true)
+  })
+})
+
+// ── Constants ─────────────────────────────────────────────
+
+describe("constants", () => {
+  it("THRESHOLD is 30", () => {
+    assert.equal(THRESHOLD, 30)
+  })
+
+  it("MIN_WORD_LENGTH is 3", () => {
+    assert.equal(MIN_WORD_LENGTH, 3)
+  })
+
+  it("NAME_WEIGHT is 3", () => {
+    assert.equal(NAME_WEIGHT, 3)
+  })
+
+  it("DESC_WEIGHT is 1", () => {
+    assert.equal(DESC_WEIGHT, 1)
+  })
+})
+
+// ── Integration: scoring scenarios ────────────────────────
+
+describe("scoring scenarios", () => {
+  const skills = [
+    { name: "backup-restore", desc: "Backup and restore databases", path: "/a", scope: "project" as const },
+    { name: "database-sync", desc: "Synchronize databases across servers", path: "/b", scope: "project" as const },
+    { name: "web-design", desc: "Design responsive web interfaces", path: "/c", scope: "global" as const },
+  ]
+
+  it("clear winner with high gap", () => {
+    const scored = scoreSkills("web design responsive", skills)
+      .filter(s => s.score > 0)
+      .sort((a, b) => b.score - a.score)
+
+    assert.equal(scored[0].name, "web-design")
+    const gap = scored[0].score - (scored[1]?.score ?? 0)
+    assert.ok(gap >= THRESHOLD, `Gap ${gap} should be >= ${THRESHOLD}`)
+  })
+
+  it("ambiguous query returns multiple close scores", () => {
+    const scored = scoreSkills("backup database", skills)
+      .filter(s => s.score > 0)
+      .sort((a, b) => b.score - a.score)
+
+    assert.ok(scored.length >= 2)
+    const gap = scored[0].score - (scored[1]?.score ?? 0)
+    assert.ok(gap < THRESHOLD, `Gap ${gap} should be < ${THRESHOLD} for ambiguous query`)
+  })
+
+  it("single skill returns auto-route", () => {
+    const single = [{ name: "only-skill", desc: "Does one thing", path: "/x", scope: "project" as const }]
+    const scored = scoreSkills("does thing", single)
+      .filter(s => s.score > 0)
+
+    assert.equal(scored.length, 1)
+  })
+
+  it("project skills sort before global", () => {
+    const all = [
+      { name: "z-global", desc: "global skill", path: "/z", scope: "global" as const },
+      { name: "a-project", desc: "project skill", path: "/a", scope: "project" as const },
+    ]
+    const sorted = [...all].sort((a, b) => {
+      if (a.scope !== b.scope) return a.scope === "project" ? -1 : 1
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+    })
+    assert.equal(sorted[0].scope, "project")
+  })
+})

@@ -2,7 +2,7 @@
 /*
  * opencode-triage CLI
  * ==================
- * Manage the triage skill router plugin.
+ * Manage the opencode-triage skill router plugin.
  *
  * Usage: /triage on | off | status | compare | help
  *
@@ -18,8 +18,9 @@ const fs = require("fs")
 const path = require("path")
 const os = require("os")
 
+const PLUGIN_NAME = "opencode-triage"
 const CMD = process.argv[2] || "help"
-const WORKTREE = process.cwd()
+const WORKTREE = findProjectRoot(process.cwd())
 const CONFIG_PATH = path.join(WORKTREE, ".opencode", "opencode.json")
 const HOMEDIR = os.homedir()
 
@@ -36,6 +37,44 @@ const YELLOW = "\x1b[33m"
 const GREEN = "\x1b[32m"
 const RESET = "\x1b[0m"
 const BOLD = "\x1b[1m"
+
+// ── Helpers ───────────────────────────────────────────────
+
+function findProjectRoot(startDir) {
+  let dir = startDir
+  while (true) {
+    const configPath = path.join(dir, ".opencode", "opencode.json")
+    if (fs.existsSync(configPath)) return dir
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return startDir
+}
+
+function safeRenameSync(src, dst) {
+  try {
+    const srcStat = fs.lstatSync(src)
+    if (srcStat.isSymbolicLink()) {
+      console.error(`[opencode-triage] Skipping symlink: ${src}`)
+      return false
+    }
+    fs.renameSync(src, dst)
+    return true
+  } catch (err) {
+    if (err.code === "EXDEV") {
+      fs.copyFileSync(src, dst)
+      fs.unlinkSync(src)
+      return true
+    } else {
+      throw err
+    }
+  }
+}
+
+function sanitizeName(name) {
+  return name.replace(/[\x1b\x9b]/g, "")
+}
 
 // ── Main Router ───────────────────────────────────────────
 
@@ -76,11 +115,14 @@ function toggle(enable) {
     if (!fs.existsSync(base)) continue
     const dirs = fs.readdirSync(base, { withFileTypes: true })
     for (const d of dirs) {
-      if (!d.isDirectory() || d.name === "triage") continue
+      if (!d.isDirectory()) continue
+      if (d.isSymbolicLink()) continue
+      if (d.name === "triage") continue
+      if (d.name.includes(path.sep) || d.name === ".." || d.name === ".") continue
       const src = path.join(base, d.name, `SKILL${fromExt}`)
       const dst = path.join(base, d.name, `SKILL${toExt}`)
       if (fs.existsSync(src)) {
-        fs.renameSync(src, dst)
+        safeRenameSync(src, dst)
         if (label.startsWith("~")) renamedGlobal++
         else renamedProject++
       }
@@ -95,10 +137,10 @@ function toggle(enable) {
     config = { "$schema": "https://opencode.ai/config.json" }
   }
   config.plugin = config.plugin || []
-  if (enable && !config.plugin.includes("triage")) {
-    config.plugin.push("triage")
+  if (enable && !config.plugin.includes(PLUGIN_NAME)) {
+    config.plugin.push(PLUGIN_NAME)
   } else if (!enable) {
-    config.plugin = config.plugin.filter(p => p !== "triage")
+    config.plugin = config.plugin.filter(p => p !== PLUGIN_NAME)
   }
   fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true })
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", "utf-8")
@@ -122,7 +164,7 @@ function showStatus() {
   let config = { plugin: [] }
   try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8")) } catch {}
 
-  const pluginActive = (config.plugin || []).some(p => p === "triage" || p === "opencode-triage")
+  const pluginActive = (config.plugin || []).some(p => p === PLUGIN_NAME)
   let disabledCount = 0
   let activeCount = 0
   const skillLines = []
@@ -131,11 +173,15 @@ function showStatus() {
     if (!fs.existsSync(base)) continue
     const dirs = fs.readdirSync(base, { withFileTypes: true })
     for (const d of dirs) {
-      if (!d.isDirectory() || d.name === "triage") continue
+      if (!d.isDirectory()) continue
+      if (d.isSymbolicLink()) continue
+      if (d.name === "triage") continue
+      if (d.name.includes(path.sep) || d.name === ".." || d.name === ".") continue
       const hasDisabled = fs.existsSync(path.join(base, d.name, "SKILL.md.disabled"))
       const hasActive = fs.existsSync(path.join(base, d.name, "SKILL.md"))
-      if (hasDisabled) { disabledCount++; skillLines.push(`  [hidden]  ${d.name}  ${label}`) }
-      else if (hasActive) { activeCount++; skillLines.push(`  [active]  ${d.name}  ${label}`) }
+      const safeName = sanitizeName(d.name)
+      if (hasDisabled) { disabledCount++; skillLines.push(`  [hidden]  ${safeName}  ${label}`) }
+      else if (hasActive) { activeCount++; skillLines.push(`  [active]  ${safeName}  ${label}`) }
     }
   }
 
@@ -183,7 +229,10 @@ function showCompare() {
     if (!fs.existsSync(base)) continue
     const dirs = fs.readdirSync(base, { withFileTypes: true })
     for (const d of dirs) {
-      if (!d.isDirectory() || d.name === "triage") continue
+      if (!d.isDirectory()) continue
+      if (d.isSymbolicLink()) continue
+      if (d.name === "triage") continue
+      if (d.name.includes(path.sep) || d.name === ".." || d.name === ".") continue
       if (fs.existsSync(path.join(base, d.name, "SKILL.md.disabled"))) hiddenCount++
       else if (fs.existsSync(path.join(base, d.name, "SKILL.md"))) exposedCount++
     }
@@ -247,11 +296,11 @@ function showCompare() {
 
 function showHelp() {
   console.log()
-  console.log(BOLD + "opencode-triage" + RESET + " — Deterministic Skill Router")
+  console.log(BOLD + "opencode-triage" + RESET + " -- Deterministic Skill Router")
   console.log("═══════════════════════════════════════════════")
   console.log()
   console.log("Routes to specialized skills via keyword matching.")
-  console.log("Skills live as SKILL.md.disabled — hidden from prompt, routed on demand.")
+  console.log("Skills live as SKILL.md.disabled -- hidden from prompt, routed on demand.")
   console.log()
   console.log(BOLD + "COMMANDS" + RESET)
   console.log()
@@ -263,8 +312,8 @@ function showHelp() {
   console.log()
   console.log(BOLD + "HOW IT WORKS" + RESET)
   console.log()
-  console.log("  Skills use SKILL.md.disabled — invisible to opencode's native")
-  console.log("  discovery. The triage plugin scans the filesystem directly")
+  console.log("  Skills use SKILL.md.disabled -- invisible to opencode's native")
+  console.log("  discovery. The opencode-triage plugin scans the filesystem directly")
   console.log("  and routes queries via keyword scoring.")
   console.log()
   console.log(BOLD + "EXAMPLES" + RESET)
@@ -278,8 +327,8 @@ function showHelp() {
   console.log()
   console.log("  1. /triage off")
   console.log("  2. Restart opencode")
-  console.log("  3. Remove \"triage\" from opencode.json plugin array")
-  console.log("  4. Delete .opencode/plugins/triage.*")
+  console.log(`  3. Remove "${PLUGIN_NAME}" from opencode.json plugin array`)
+  console.log("  4. Delete .opencode/plugins/opencode-triage.*")
   console.log("  5. Delete .opencode/commands/triage.md")
   console.log()
   console.log("  Zero residue. All skills work natively again.")
