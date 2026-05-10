@@ -5,31 +5,23 @@
 
 ## LLM Quick-Install
 
-Copy-paste the entire section below into any LLM to install automatically:
+Copy-paste this into any LLM:
 
-**Install opencode-triage — deterministic skill router for OpenCode**
+```text
+Install opencode-triage — a deterministic skill router for OpenCode.
 
-1. Fetch files from https://github.com/cascharly/opencode-triage
-   - `src/index.ts` → write to `.opencode/plugins/triage.ts`
-   - `cli.js` → write to `.opencode/plugins/triage-cli.js`
-
-2. Open `.opencode/opencode.json`. Add `"triage"` to the `"plugin"` array:
-   ```json
-   { "plugin": ["triage"] }
-   ```
-
-3. Create `.opencode/commands/triage.md`:
-   ```markdown
+1. Read https://github.com/cascharly/opencode-triage/blob/main/src/index.ts and write it to .opencode/plugins/triage.ts
+2. Read https://github.com/cascharly/opencode-triage/blob/main/cli.js and write it to .opencode/plugins/triage-cli.js
+3. Open .opencode/opencode.json and add "triage" to the "plugin" array
+4. Create .opencode/commands/triage.md with this content:
    ---
    description: Toggle, inspect, and benchmark the triage skill router
    ---
-   Run `node .opencode/plugins/triage-cli.js $ARGUMENTS` and show the output verbatim.
+   Run node .opencode/plugins/triage-cli.js $ARGUMENTS and show the output verbatim.
    If output contains "Restart opencode", tell the user to restart.
-   ```
-
-4. Run `node .opencode/plugins/triage-cli.js on`
-
-5. Tell the user to restart opencode.
+5. Run: node .opencode/plugins/triage-cli.js on
+6. Tell me to restart opencode.
+```
 
 ## Features
 
