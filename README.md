@@ -111,6 +111,21 @@ Plugin: scans filesystem → scores skills against query
 Plugin: returns matched skill content directly
 ```
 
+## **IMPORTANT: Cross-Tool Impact**
+
+Triage hides skills by **renaming** `SKILL.md` → `SKILL.md.disabled` on disk. Because it operates on the shared skill directories that multiple AI tools read from, the change is **visible to all tools** that scan for `SKILL.md`:
+
+| Tool | Effect when triage is `on` |
+|------|---------------------------|
+| OpenCode | Skills hidden from prompt (intended) |
+| Claude Code | Skills hidden — `.claude/skills/` is scanned |
+| Cursor / Windsurf / others | Skills hidden — any tool reading `.agent/skills/`, `.claude/skills/`, etc. is affected |
+| Any tool scanning these dirs | Will not find active `SKILL.md` files |
+
+This is **by design** — the same directories are shared across tools for skill portability. Running `/triage off` restores all filenames (`SKILL.md.disabled` → `SKILL.md`) and all tools see skills again.
+
+> **Important:** `~/.config/opencode/skills/` is only read by OpenCode, so skills stored there are isolated. If you use other AI coding tools and want skills available to them while triage is active, keep copies in tool-specific directories that triage does not scan.
+
 ## User Flow
 
 Here's what a typical session looks like with opencode-triage enabled:
