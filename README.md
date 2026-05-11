@@ -1,6 +1,6 @@
 # opencode-triage
 
-> Deterministic skill router for OpenCode. Save up to 94% of tokens by hiding skills from the system prompt and loading them only when needed.
+> Deterministic skill router for OpenCode. Save up to 94% of tokens **on skills** by hiding them from the system prompt and loading only when needed.
 
 ## Quick Start
 
@@ -24,7 +24,9 @@ Install opencode-triage (https://github.com/cascharly/opencode-triage) — a det
 
 ## What It Does
 
-Normally **all** your skills sit in the system prompt and burn tokens on every message — even when irrelevant. Triage hides them and loads the right one **only when the LLM needs it**.
+**This plugin saves tokens on skills only.** The rest of your system prompt (instructions, tools, etc.) is untouched.
+
+Normally all your skills sit in the system prompt and burn tokens on every message — even when irrelevant. Triage hides just the skills and loads the right one **only when the LLM needs it**.
 
 ```
 No triage:   [skill A] [skill B] [skill C] ...  ← always burning tokens
@@ -95,7 +97,7 @@ Plugin: scans filesystem → scores skills → returns best match
 
 No LLM reasoning overhead. No extra API calls. Just fast deterministic matching.
 
-## Token Savings
+## Token Savings (skills only)
 
 | | Without Triage | With Triage |
 |---|---|---|
