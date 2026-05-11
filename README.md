@@ -65,6 +65,17 @@ Restart OpenCode. `/triage` is available only in this project. Type `/triage on 
 Global affects `~/.config/opencode/skills/`, `~/.claude/skills/`, `~/.agent/skills/`.
 Local affects `.opencode/skills/`, `.claude/skills/`, `.agent/skills/` in the current project.
 
+### Configuration Combinations
+
+With a global skill A and a project skill B:
+
+| State | Global (A) | Project (B) | How to configure |
+|---|---|---|---|
+| Full visibility | visible | visible | (default) |
+| Triage in project only | visible | hidden | `/triage on --local` |
+| Triage globally only | hidden | visible | `/triage on` |
+| Full triage | hidden | hidden | `/triage on` then `/triage on --local` |
+
 ## How It Works
 
 The LLM calls `triage()` when it encounters a task it can't handle with general knowledge. The plugin scores all hidden skills against the query using keyword matching and returns the best match.
