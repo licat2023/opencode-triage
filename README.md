@@ -176,12 +176,14 @@ The LLM picks the right one based on context and calls triage again with the ski
 
 This is where opencode-triage delivers the most value. Every message without triage burns tokens on skills you don't need. With triage, you only pay for the skill you actually use.
 
+> **Estimates only.** Figures below reflect **skill-related tokens** in the system prompt — not total context (which includes conversation history, file contents, tool results, etc.). Your actual savings depend on skill count, message length, and lookup frequency.
+
 | | Without Triage | With Triage |
 |---|---|---|
-| System prompt (per msg, 20 skills) | ~1,000 | ~40 |
+| Skills in system prompt (per msg, 20 skills) | ~1,000 | ~40 |
 | Skill lookup overhead | ~210 | ~55 |
 | Session total (10 msgs, 5 lookups) | ~11,050 | ~675 |
-| **Savings** | — | **94%** |
+| **Skill-token savings** | — | **~94%** |
 
 Run `/triage compare` for live numbers based on your skill inventory. The more skills you have, the more tokens you save with opencode-triage.
 

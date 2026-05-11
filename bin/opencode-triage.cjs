@@ -26,6 +26,7 @@ const HOMEDIR = os.homedir()
 
 const SKILL_DIRS = [
   { base: path.join(WORKTREE, ".agent", "skills"), label: ".agent/" },
+  { base: path.join(WORKTREE, ".agents", "skills"), label: ".agents/" },
   { base: path.join(WORKTREE, ".claude", "skills"), label: ".claude/" },
   { base: path.join(WORKTREE, ".opencode", "skills"), label: ".opencode/" },
   { base: path.join(HOMEDIR, ".agents", "skills"), label: "~/.agents/" },
@@ -243,7 +244,7 @@ function showCompare() {
     console.log()
     console.log("No skills found. Nothing to compare.")
     console.log()
-    console.log("Create skills in .opencode/skills/ or .agent/skills/")
+    console.log("Create skills in .opencode/skills/, .agent/skills/, or .agents/skills/")
     console.log()
     return
   }
@@ -297,45 +298,17 @@ function showCompare() {
 function showHelp() {
   console.log()
   console.log(BOLD + "opencode-triage" + RESET + " -- Deterministic Skill Router")
-  console.log("═══════════════════════════════════════════════")
   console.log()
-  console.log("Routes to specialized skills via keyword matching.")
-  console.log("Skills live as SKILL.md.disabled -- hidden from prompt, routed on demand.")
+  console.log("  on       Hide skills from prompt, enable triage (restart after)")
+  console.log("  off      Expose skills, disable triage (restart after)")
+  console.log("  status   Show active/hidden skills + token estimate")
+  console.log("  compare  Token/time cost comparison")
+  console.log("  help     Show this help")
   console.log()
-  console.log(BOLD + "COMMANDS" + RESET)
+  console.log(BOLD + "MORE" + RESET)
   console.log()
-  console.log("  /triage on       Enable plugin + hide skills from system prompt")
-  console.log("  /triage off      Disable plugin + restore native skill discovery")
-  console.log("  /triage status   Show state, hidden/active counts, token estimate")
-  console.log("  /triage compare  Token/time cost comparison table")
-  console.log("  /triage help     Show this help")
-  console.log()
-  console.log(BOLD + "HOW IT WORKS" + RESET)
-  console.log()
-  console.log("  Skills use SKILL.md.disabled -- invisible to opencode's native")
-  console.log("  discovery. The opencode-triage plugin scans the filesystem directly")
-  console.log("  and routes queries via keyword scoring.")
-  console.log()
-  console.log(BOLD + "EXAMPLES" + RESET)
-  console.log()
-  console.log("  /triage on          # Enable (restart after)")
-  console.log("  /triage off         # Disable (restart after)")
-  console.log("  /triage status      # See active/hidden skills")
-  console.log("  /triage compare     # Calculate savings")
-  console.log()
-  console.log(BOLD + "UNINSTALL" + RESET)
-  console.log()
-  console.log("  1. /triage off")
-  console.log("  2. Restart opencode")
-  console.log(`  3. Remove "${PLUGIN_NAME}" from opencode.json plugin array`)
-  console.log("  4. Delete .opencode/plugins/opencode-triage.*")
-  console.log("  5. Delete .opencode/commands/triage.md")
-  console.log()
-  console.log("  Zero residue. All skills work natively again.")
-  console.log()
-  console.log(BOLD + "LINKS" + RESET)
-  console.log()
-  console.log("  https://github.com/cascharly/opencode-triage")
+  console.log("  " + BOLD + "Uninstall:" + RESET + "  /triage off, restart, remove from opencode.json, delete plugin files")
+  console.log("  " + BOLD + "Docs:" + RESET + "      https://github.com/cascharly/opencode-triage")
   console.log()
 }
 

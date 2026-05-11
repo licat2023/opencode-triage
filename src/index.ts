@@ -43,6 +43,7 @@ const EXCLUDED_SKILLS = new Set(["triage"])
 function buildSkillLocations(worktree: string) {
   return [
     { base: join(worktree, ".agent", "skills"), scope: "project" as const },
+    { base: join(worktree, ".agents", "skills"), scope: "project" as const },
     { base: join(worktree, ".claude", "skills"), scope: "project" as const },
     { base: join(worktree, ".opencode", "skills"), scope: "project" as const },
     { base: join(homedir(), ".agents", "skills"), scope: "global" as const },
@@ -87,6 +88,7 @@ export const server: Plugin = async ({ worktree }) => {
               "To add a skill:",
               "  .opencode/skills/<name>/SKILL.md",
               "  .agent/skills/<name>/SKILL.md",
+              "  .agents/skills/<name>/SKILL.md",
               "",
               "Use /triage status to verify your setup.",
             ].join("\n")
