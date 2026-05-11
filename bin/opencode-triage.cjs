@@ -17,9 +17,15 @@
 const fs = require("fs")
 const path = require("path")
 const os = require("os")
+const https = require("https")
 
 const PLUGIN_NAME = "opencode-triage"
 const CMD = process.argv[2] || "help"
+
+let CURRENT_VERSION
+try { CURRENT_VERSION = require(path.join(__dirname, "..", "package.json")).version }
+catch { CURRENT_VERSION = "0.0.0" }
+
 const WORKTREE = findProjectRoot(process.cwd())
 const CONFIG_PATH = path.join(WORKTREE, ".opencode", "opencode.json")
 const HOMEDIR = os.homedir()
@@ -91,6 +97,10 @@ function main() {
       return showStatus()
     case "compare":
       return showCompare()
+    case "version":
+    case "--version":
+    case "-v":
+      return showVersion()
     case "help":
     case "--help":
     case "-h":
@@ -98,7 +108,7 @@ function main() {
     default:
       console.error(`Unknown command: ${CMD}`)
       console.error()
-      console.error(`Usage: /triage on | off | status | compare | help`)
+      console.error(`Usage: /triage on | off | status | compare | version | help`)
       console.error(`Try /triage help for detailed usage.`)
       process.exit(1)
   }
@@ -293,16 +303,56 @@ function showCompare() {
   console.log()
 }
 
+// ── version ───────────────────────────────────────────────
+
+function showVersion() {
+  console.log(`opencode-triage v${CURRENT_VERSION}`)
+}
+
+// ── semver ────────────────────────────────────────────────
+
+function semverGt(a, b) {
+  const pa = a.split(".").map(Number)
+  const pb = b.split(".").map(Number)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = pa[i] ?? 0
+    const nb = pb[i] ?? 0
+    if (na > nb) return true
+    if (na < nb) return false
+  }
+  return false
+}
+
+function checkForUpdate() {
+  https.get("https://registry.npmjs.org/opencode-triage/latest", { timeout: 3000 }, (res) => {
+    let data = ""
+    res.on("data", (chunk) => data += chunk)
+    res.on("end", () => {
+      try {
+        const pkg = JSON.parse(data)
+        const latest = pkg.version
+        if (latest && semverGt(latest, CURRENT_VERSION)) {
+          console.log()
+          console.log(YELLOW + BOLD + "Update available:" + RESET + YELLOW + ` ${CURRENT_VERSION} → ${latest}` + RESET)
+          console.log(YELLOW + `  npm install -g opencode-triage@latest` + RESET)
+          console.log()
+        }
+      } catch {}
+    })
+  }).on("error", () => {})
+}
+
 // ── help ──────────────────────────────────────────────────
 
 function showHelp() {
   console.log()
-  console.log(BOLD + "opencode-triage" + RESET + " -- Deterministic Skill Router")
+  console.log(BOLD + "opencode-triage v" + CURRENT_VERSION + RESET + " -- Deterministic Skill Router")
   console.log()
   console.log("  on       Hide skills from prompt, enable triage (restart after)")
   console.log("  off      Expose skills, disable triage (restart after)")
   console.log("  status   Show active/hidden skills + token estimate")
   console.log("  compare  Token/time cost comparison")
+  console.log("  version  Show version and check for updates")
   console.log("  help     Show this help")
   console.log()
   console.log(BOLD + "MORE" + RESET)
@@ -315,3 +365,4 @@ function showHelp() {
 // ── Run ───────────────────────────────────────────────────
 
 main()
+checkForUpdate()
