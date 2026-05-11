@@ -7,7 +7,8 @@ Deterministic skill router for OpenCode. Published as `opencode-triage` on npm.
 ## Entrypoints
 
 - **Plugin** (`src/index.ts`) — exports `server`, consumed by OpenCode Bun runtime. No build step.
-- **CLI** (`cli.cjs`) — standalone Node.js script for user commands.
+- **CLI** (`bin/opencode-triage.cjs`) — standalone Node.js script for user commands.
+- **Postinstall** (`postinstall.cjs`) — auto-creates `/triage` command file on npm install.
 
 ## Commands
 
@@ -27,10 +28,21 @@ No test runner, no linter, no formatter config. No tsconfig.json in repo.
 
 ## CLI behavior
 
-- `/triage on` — renames `SKILL.md` → `SKILL.md.disabled` (hides skills), adds `"opencode-triage"` to `opencode.json` plugin array
-- `/triage off` — renames `SKILL.md.disabled` → `SKILL.md` (exposes skills), removes `"opencode-triage"` from plugin array
+- Default scope is **global**. Use `--local` flag for project-level.
+- `/triage on` — hides global skills, registers plugin globally
+- `/triage on --local` — hides project skills, registers plugin locally
+- `/triage off` — exposes global skills, unregisters plugin globally
+- `/triage off --local` — exposes project skills, unregisters plugin locally
+- `/triage status` — shows plugin state per scope
+- Each scope is independent — 4 possible combinations
 - Always requires restart after toggle
+
+## Postinstall
+
+- Detects global vs local via `npm_config_global` env var
+- Auto-creates command file: `~/.config/opencode/commands/triage.md` (global) or `.opencode/commands/triage.md` (local)
+- Command template uses `npx -y opencode-triage $ARGUMENTS`
 
 ## Publishing
 
-`npm publish` — files included via `"files": ["src/", "cli.cjs", "README.md"]` in package.json. `.npmignore` excludes `*.tgz`, `.eslintrc*`, `tsconfig.json`.
+`npm publish` — files included via `"files": ["src/", "bin/", "postinstall.cjs", "README.md"]` in package.json. `.npmignore` excludes `*.tgz`, `.eslintrc*`, `tsconfig.json`.

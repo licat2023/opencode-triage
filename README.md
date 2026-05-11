@@ -1,228 +1,129 @@
 # opencode-triage
 
-> Deterministic skill router for OpenCode. Save OpenCode tokens by keeping skills
-> out of the system prompt and routing via keyword matching instead of LLM reasoning.
+> Deterministic skill router for OpenCode. Save up to 94% of tokens by hiding skills from the system prompt and loading them only when needed.
 
-## Mental Model
+## Quick Start
 
-Skills are specialized instructions loaded into the system prompt. Normally, **all** skills are visible and consume tokens on every message — even when irrelevant. This is the biggest source of wasted tokens in OpenCode's AI coding agent workflow.
-
-Triage flips this: skills are hidden from the system prompt and fetched **on demand** via a `triage()` tool the LLM calls when it needs help. Reduce OpenCode token usage by up to 94% with zero impact on capability.
-
-```
-No triage:   [skill A] [skill B] [skill C] ...  ← all in prompt, always burning tokens
-With triage: triage({ query }) → finds the right skill → returns it only when needed
+```bash
+npm install -g opencode-triage
 ```
 
-**The lifecycle of a skill:**
-
-```
-SKILL.md                    SKILL.md.disabled
-  │                              │
-  │  exposed in prompt           │  hidden from prompt
-  │  cost: ~50 tokens/msg        │  cost: 0 tokens/msg
-  │                              │
-  └─── /triage on ──────────────▶
-  ◀─── /triage off ─────────────┘
-```
-
-The LLM calls `triage()` when it encounters a task it can't handle with general knowledge. The plugin scores installed skills against the query using keyword matching and returns the best match. No skills in the prompt, no LLM guessing across a long list, and no wasted tokens. This is the most effective OpenCode token optimization available.
+Restart OpenCode, then type `/triage on`. That's it.
 
 ## LLM Quick-Install
 
 Copy-paste this into any LLM:
 
 ```text
-Install opencode-triage — a deterministic skill router for OpenCode.
+Install opencode-triage (https://github.com/cascharly/opencode-triage) — a deterministic skill router for OpenCode.
 
-1. Read https://github.com/cascharly/opencode-triage/blob/main/src/index.ts and write it to .opencode/plugins/opencode-triage.ts
-2. Read https://github.com/cascharly/opencode-triage/blob/main/triage-cli.cjs and write it to .opencode/commands/triage-cli.cjs
-3. Open .opencode/opencode.json and add "opencode-triage" to the "plugin" array
-4. Create .opencode/commands/triage.md with this content:
-   ---
-   description: Toggle, inspect, and benchmark the triage skill router
-   ---
-   Run node .opencode/commands/triage-cli.cjs $ARGUMENTS and show the output verbatim.
-   If output contains "Restart opencode", tell the user to restart.
-5. Run: node .opencode/commands/triage-cli.cjs on
-6. Tell me to restart opencode.
+1. Run: npm install -g opencode-triage
+2. If any errors occur, visit the repo link above and resolve them.
+3. Tell me to restart OpenCode.
 ```
 
-## Features
+## What It Does
 
-- **94% token savings** — save OpenCode tokens by removing skills from the system prompt, zero token cost on every idle message
-- **Deterministic routing** — same query always returns the same skill, no hallucinated names or wrong routes
-- **Zero overhead when idle** — skills don't exist until `triage()` is called, no cost until you need one
-- **Cross-platform** — macOS, Linux, Windows (native + WSL)
-- **One-click uninstall** — `/triage off` restores everything to native
-- **Open source & free** — MIT license, install via npm with zero dependencies beyond OpenCode itself
+Normally **all** your skills sit in the system prompt and burn tokens on every message — even when irrelevant. Triage hides them and loads the right one **only when the LLM needs it**.
+
+```
+No triage:   [skill A] [skill B] [skill C] ...  ← always burning tokens
+With triage: triage({ query }) → finds the right skill → returns it only when needed
+```
+
+Skills are renamed from `SKILL.md` → `SKILL.md.disabled` to hide them from OpenCode's discovery. Run `/triage off` to restore.
 
 ## Install
 
-### npm (recommended)
+### Global (recommended)
 
-The fastest way to reduce OpenCode token usage — install the opencode-triage plugin and hide all skills from the system prompt in seconds.
-
-Add to `.opencode/opencode.json`:
-
-```json
-{
-  "plugin": ["opencode-triage"]
-}
+```bash
+npm install -g opencode-triage
 ```
 
-OpenCode auto-installs it via Bun on restart. Then run:
+Restart OpenCode. `/triage` is available in **every** project. Type `/triage on` to enable.
 
+### Per-project
+
+```bash
+npm install opencode-triage
 ```
-/triage on
-```
 
-### Manual
-
-Copy `opencode-triage.ts` into `.opencode/plugins/`, `triage-cli.cjs` into `.opencode/commands/`, and add `"opencode-triage"` to the plugin array.
+Restart OpenCode. `/triage` is available only in this project. Type `/triage on --local` to enable.
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `/triage on` | Enable plugin + hide all skills from system prompt |
-| `/triage off` | Disable plugin + restore native skill discovery |
-| `/triage status` | Show plugin state, hidden/active counts, token estimate |
-| `/triage compare` | Token/time cost comparison table |
-| `/triage help` | Full usage guide |
+| Command | What it does |
+|---|---|
+| `/triage on` | Hide global skills |
+| `/triage on --local` | Hide project skills for this project |
+| `/triage off` | Show global skills again |
+| `/triage off --local` | Show project skills again |
+| `/triage status` | See what's hidden and what's active |
+| `/triage compare` | Token savings estimate for your skills |
 
-## How it works
+Global affects `~/.config/opencode/skills/`, `~/.claude/skills/`, `~/.agent/skills/`.
+Local affects `.opencode/skills/`, `.claude/skills/`, `.agent/skills/` in the current project.
 
-Skills remain as standard `SKILL.md` files with YAML frontmatter. The `.disabled` suffix hides them from OpenCode's native discovery. The triage plugin scans the filesystem directly and routes queries via keyword scoring — no LLM reasoning overhead, no extra API calls, just fast deterministic matching.
+## How It Works
+
+The LLM calls `triage()` when it encounters a task it can't handle with general knowledge. The plugin scores all hidden skills against the query using keyword matching and returns the best match.
 
 ```
 User: "backup my database"
-        │
-        ▼
-LLM:   triage({ query: "backup my database" })
-        │
-        ▼
-Plugin: scans filesystem → scores skills against query
-        backup-restore     score=60  (matched: backup, database)
-        database-sync      score=25  (matched: database)
-        gap=35 ≥ threshold(30) → HIGH CONFIDENCE
-        │
-        ▼
-Plugin: returns matched skill content directly
+  │
+  ▼
+LLM: triage({ query: "backup my database" })
+  │
+  ▼
+Plugin: scans filesystem → scores skills → returns best match
+  backup-restore     score=60  (matched: backup, database)
+  database-sync      score=25  (matched: database)
+  gap=35 ≥ threshold(30) → HIGH CONFIDENCE
 ```
 
-## **IMPORTANT: Cross-Tool Impact**
-
-Triage hides skills by **renaming** `SKILL.md` → `SKILL.md.disabled` on disk. Because it operates on the shared skill directories that multiple AI tools read from, the change is **visible to all tools** that scan for `SKILL.md`:
-
-| Tool | Effect when triage is `on` |
-|------|---------------------------|
-| OpenCode | Skills hidden from prompt (intended) |
-| Claude Code | Skills hidden — `.claude/skills/` is scanned |
-| Cursor / Windsurf / others | Skills hidden — any tool reading `.agent/skills/`, `.claude/skills/`, etc. is affected |
-| Any tool scanning these dirs | Will not find active `SKILL.md` files |
-
-This is **by design** — the same directories are shared across tools for skill portability. Running `/triage off` restores all filenames (`SKILL.md.disabled` → `SKILL.md`) and all tools see skills again.
-
-> **Important:** `~/.config/opencode/skills/` is only read by OpenCode, so skills stored there are isolated. If you use other AI coding tools and want skills available to them while triage is active, keep copies in tool-specific directories that triage does not scan.
-
-## User Flow
-
-Here's what a typical session looks like with opencode-triage enabled:
-
-**1. Session starts** — all skills are hidden from the system prompt. Zero token overhead.
-
-**2. General question — no skills needed:**
-
-```
-User: "What does this function do?"
-```
-
-The LLM answers with its general knowledge. No triage call fires. Zero extra tokens spent.
-
-**3. Specialized task — clear match:**
-
-```
-User: "Backup my PostgreSQL database to S3"
-```
-
-The LLM recognizes this needs specialized knowledge and calls:
-
-```
-triage({ query: "Backup my PostgreSQL database to S3" })
-```
-
-The plugin scores all hidden skills:
-
-```
-backup-restore     score=60  (name:backup, desc:database)
-database-sync      score=25  (desc:database)
-webhook-automation score=0   (no match)
-```
-
-Gap = 35 ≥ threshold (30) → **high confidence**. The plugin returns the `backup-restore` skill content directly. The LLM now has the exact instructions it needs.
-
-**4. Ambiguous task — multiple candidates:**
-
-```
-User: "Set up the database"
-```
-
-Multiple skills match with similar scores:
-
-```
-backup-restore     score=30  (desc:database)
-database-sync      score=30  (name:database)
-```
-
-Gap = 0 < threshold → **ambiguous**. The plugin returns the top candidates:
-
-```
-Multiple matches for "Set up the database". Pick one:
-1. backup-restore — Backup and restore databases
-2. database-sync — Synchronize databases across servers
-
-Example: triage({ query: "backup-restore" })
-```
-
-The LLM picks the right one based on context and calls triage again with the skill name.
+No LLM reasoning overhead. No extra API calls. Just fast deterministic matching.
 
 ## Token Savings
 
-This is where opencode-triage delivers the most value. Every message without triage burns tokens on skills you don't need. With triage, you only pay for the skill you actually use.
-
-> **Estimates only.** Figures below reflect **skill-related tokens** in the system prompt — not total context (which includes conversation history, file contents, tool results, etc.). Your actual savings depend on skill count, message length, and lookup frequency.
-
 | | Without Triage | With Triage |
 |---|---|---|
-| Skills in system prompt (per msg, 20 skills) | ~1,000 | ~40 |
-| Skill lookup overhead | ~210 | ~55 |
+| Skills in prompt (per msg, 20 skills) | ~1,000 | ~40 |
 | Session total (10 msgs, 5 lookups) | ~11,050 | ~675 |
-| **Skill-token savings** | — | **~94%** |
+| **Savings** | — | **~94%** |
 
-Run `/triage compare` for live numbers based on your skill inventory. The more skills you have, the more tokens you save with opencode-triage.
+Run `/triage compare` for live numbers based on your skill inventory.
 
-## Discovery Paths
+## IMPORTANT: Cross-Tool Impact
 
-The plugin scans both `.md` and `.disabled` skill files in:
+Triage renames `SKILL.md` → `SKILL.md.disabled` on disk. Other AI tools that scan the same directories (Claude Code, Cursor, Windsurf) will also see skills as hidden. Run `/triage off` to restore.
 
-| Path | Scope |
-|------|-------|
-| `.opencode/skills/<name>/` | Project |
-| `.claude/skills/<name>/` | Project |
-| `.agent/skills/<name>/` | Project |
-| `~/.config/opencode/skills/<name>/` | Global |
-| `~/.claude/skills/<name>/` | Global |
-| `~/.agents/skills/<name>/` | Global |
+Use `/triage on --local` to isolate triage to one project without affecting global skills.
 
 ## Uninstall
 
+**Expose skills** (reversible — plugin and command stay):
+
 ```
 /triage off
-<restart opencode>
 ```
 
-Remove `"opencode-triage"` from `opencode.json`. Zero residue. All skills work natively again.
+**Remove the package:**
+
+```bash
+npm uninstall -g opencode-triage
+```
+
+Delete the command file if present:
+
+```bash
+rm ~/.config/opencode/commands/triage.md   # macOS/Linux
+del %USERPROFILE%\.config\opencode\commands\triage.md   # Windows
+```
+
+Restart OpenCode. Clean.
+
+For per-project installs, remove `"opencode-triage"` from `.opencode/opencode.json` and run `npm uninstall opencode-triage`.
 
 ## Compatibility
 
