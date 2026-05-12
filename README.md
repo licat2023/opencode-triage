@@ -170,7 +170,7 @@ Run `/triage compare` for live numbers based on your skill inventory.
 
 ## Cross-Tool Impact
 
-Triage renames `SKILL.md` → `SKILL.md.disabled` on disk. Other AI tools that scan the same directories (Claude Code, Cursor, Windsurf) will also see skills as hidden. Run `/triage off` to restore.
+Triage renames `SKILL.md` → `SKILL.md.disabled` on disk. Other AI tools that scan the same directories (Claude Code, Cursor, Windsurf) will not see them either — the skills are hidden from all tools. Run `/triage off` to restore.
 
 Use `/triage on --local` to isolate triage to one project without affecting global skills.
 
