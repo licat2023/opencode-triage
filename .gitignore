@@ -2,4 +2,7 @@ node_modules/
 *.tgz
 dist/
 .opencode/
+.agents/
+.claude/
 tsconfig.json
+skills-lock.json
