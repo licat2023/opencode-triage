@@ -4,11 +4,13 @@
  * ==================
  * Manage the opencode-triage skill router plugin.
  *
- * Usage: /triage on | off | status | compare | help
+ * Usage: /triage on [--local | --global | --both] | off [--local | --global | --both] | status | compare | help
  *
  * Quickstart:
- *   /triage on        Enable plugin + hide skills from system prompt
- *   /triage off       Disable plugin + restore native skill discovery
+ *   /triage on        Enable plugin + hide skills from system prompt (global)
+ *   /triage on --both Enable in both scopes (global + local)
+ *   /triage off       Disable plugin + restore native skill discovery (global)
+ *   /triage off --both Disable in both scopes
  *   /triage status    Show current plugin state and skill counts
  *   /triage compare   Show token/time cost comparison table
  *   /triage help      Show full usage guide
@@ -32,7 +34,7 @@ const HOMEDIR = os.homedir()
 const CMD_TEMPLATE = `---
 description: Toggle, inspect, and benchmark the triage skill router
 ---
-Run node "%USERPROFILE%\.config\opencode\node_modules\opencode-triage\bin\opencode-triage.cjs" $ARGUMENTS and show the output verbatim.
+Run npx -y opencode-triage $ARGUMENTS and show the output verbatim.
 If output contains "Restart opencode", tell the user to restart.
 `
 const LOCAL_CFG_PATH  = path.join(WORKTREE, ".opencode", "opencode.json")
@@ -73,11 +75,6 @@ function findProjectRoot(startDir) {
 
 function safeRenameSync(src, dst) {
   try {
-    const srcStat = fs.lstatSync(src)
-    if (srcStat.isSymbolicLink()) {
-      console.error(`[opencode-triage] Skipping symlink: ${src}`)
-      return false
-    }
     fs.renameSync(src, dst)
     return true
   } catch (err) {
@@ -102,7 +99,10 @@ function escapeRegex(s) {
 // ── Main Router ───────────────────────────────────────────
 
 function main() {
-  const scopeFlag = process.argv.includes("--local") ? "local" : process.argv.includes("--global") ? "global" : null
+  const scopeFlag = process.argv.includes("--both") ? "both"
+    : process.argv.includes("--local") ? "local"
+    : process.argv.includes("--global") ? "global"
+    : null
   const toggleScope = scopeFlag || "global" // no flag = global by default
   switch (CMD) {
     case "on":
@@ -112,7 +112,7 @@ function main() {
     case "disable":
       return toggle(false, toggleScope)
     case "status":
-      return showStatus(scopeFlag) // null → show both scopes
+      return showStatus()
     case "compare":
       return showCompare()
     case "version":
@@ -141,10 +141,12 @@ function toggle(enable, scope) {
   let renamedGlobal = 0
 
   for (const { base, label } of SKILL_DIRS) {
-    // strict scoping: local → project dirs only; global → global dirs only
+    // strict scoping: local → project dirs only; global → global dirs only; both → all dirs
     const isGlobalDir = label.startsWith("~")
-    if (scope === "local") { if (isGlobalDir) continue }
-    if (scope === "global") { if (!isGlobalDir) continue }
+    if (scope !== "both") {
+      if (scope === "local") { if (isGlobalDir) continue }
+      if (scope === "global") { if (!isGlobalDir) continue }
+    }
     if (!fs.existsSync(base)) continue
     const dirs = fs.readdirSync(base, { withFileTypes: true })
     for (const d of dirs) {
@@ -162,7 +164,7 @@ function toggle(enable, scope) {
     }
   }
 
-  const scopes = [scope]
+  const scopes = scope === "both" ? ["global", "local"] : [scope]
 
   for (const s of scopes) {
     const cmdFile = s === "global" ? GLOBAL_CMD_FILE : LOCAL_CMD_FILE
@@ -181,7 +183,7 @@ function toggle(enable, scope) {
   }
 
   const totalRenamed = renamedProject + renamedGlobal
-  const scopeLabel = scope ? ` (${scope} scope)` : ""
+  const scopeLabel = scope === "both" ? " (both scopes)" : scope ? ` (${scope} scope)` : ""
   console.log()
   console.log(BOLD + (enable ? "Triage ON" : "Triage OFF") + scopeLabel + RESET)
   console.log()
@@ -222,24 +224,57 @@ function updateGlobalConfig(enable) {
     return
   }
   let text = fs.readFileSync(GLOBAL_CFG_PATH, "utf-8")
-  const hasPlugin = text.includes(`"${PLUGIN_NAME}"`)
-  if (enable && !hasPlugin) {
-    text = text.replace(/"plugin":\s*\[/m, `"plugin": [\n    "${PLUGIN_NAME}",`)
-    fs.writeFileSync(GLOBAL_CFG_PATH, text, "utf-8")
-    console.log(`Config:    added to ${GLOBAL_CFG_PATH}`)
-  } else if (!enable && hasPlugin) {
-    text = text.replace(new RegExp(`\\s*"${escapeRegex(PLUGIN_NAME)}",?\\s*\\n?`, "g"), "\n")
-    fs.writeFileSync(GLOBAL_CFG_PATH, text, "utf-8")
-    console.log(`Config:    removed from ${GLOBAL_CFG_PATH}`)
+
+  // Try to parse as JSON first (no comments case)
+  try {
+    const config = JSON.parse(text)
+    if (enable) {
+      config.plugin = config.plugin || []
+      if (!config.plugin.includes(PLUGIN_NAME)) {
+        config.plugin.push(PLUGIN_NAME)
+        text = JSON.stringify(config, null, 2) + "\n"
+        fs.writeFileSync(GLOBAL_CFG_PATH, text, "utf-8")
+        console.log(`Config:    added to ${GLOBAL_CFG_PATH}`)
+      }
+    } else {
+      if (config.plugin && config.plugin.includes(PLUGIN_NAME)) {
+        config.plugin = config.plugin.filter(p => p !== PLUGIN_NAME)
+        text = JSON.stringify(config, null, 2) + "\n"
+        fs.writeFileSync(GLOBAL_CFG_PATH, text, "utf-8")
+        console.log(`Config:    removed from ${GLOBAL_CFG_PATH}`)
+      }
+    }
+    return
+  } catch { /* JSONC with comments — fall through to regex approach */ }
+
+  if (enable) {
+    const hasPlugin = text.includes(`"${PLUGIN_NAME}"`)
+    if (!hasPlugin) {
+      text = text.replace(/"plugin":\s*\[/m, `"plugin": [\n    "${PLUGIN_NAME}",`)
+      fs.writeFileSync(GLOBAL_CFG_PATH, text, "utf-8")
+      console.log(`Config:    added to ${GLOBAL_CFG_PATH}`)
+    }
+  } else {
+    // Target only the plugin name within the "plugin" array context
+    const pluginArrayMatch = text.match(/"plugin"\s*:\s*\[([^\]]*)\]/s)
+    if (pluginArrayMatch) {
+      const arrayContent = pluginArrayMatch[1]
+      const escaped = escapeRegex(PLUGIN_NAME)
+      const newContent = arrayContent.replace(new RegExp(`\\s*"${escaped}"\\s*,?\\s*`, "g"), "")
+      if (newContent !== arrayContent) {
+        const fullMatch = pluginArrayMatch[0]
+        const newMatch = fullMatch.replace(arrayContent, newContent.replace(/,\s*\]/, "]"))
+        text = text.replace(fullMatch, newMatch)
+        fs.writeFileSync(GLOBAL_CFG_PATH, text, "utf-8")
+        console.log(`Config:    removed from ${GLOBAL_CFG_PATH}`)
+      }
+    }
   }
 }
 
 // ── status ────────────────────────────────────────────────
 
-function showStatus(scope) {
-  const showLocal = !scope || scope === "local"
-  const showGlobal = !scope || scope === "global"
-
+function showStatus() {
   // Check configs
   let localCfg = { plugin: [] }
   try { localCfg = JSON.parse(fs.readFileSync(LOCAL_CFG_PATH, "utf-8")) } catch {}
@@ -266,10 +301,10 @@ function showStatus(scope) {
       const safeName = sanitizeName(d.name)
       if (hasDisabled) {
         if (label.startsWith("~")) { gloDisabled++ } else { projDisabled++ }
-        if (!scope) skillLines.push(`  [hidden]  ${safeName}  ${label}`)
+        skillLines.push(`  [hidden]  ${safeName}  ${label}`)
       } else if (hasActive) {
         if (label.startsWith("~")) { gloActive++ } else { projActive++ }
-        if (!scope) skillLines.push(`  [active]  ${safeName}  ${label}`)
+        skillLines.push(`  [active]  ${safeName}  ${label}`)
       }
     }
   }
@@ -281,37 +316,28 @@ function showStatus(scope) {
   console.log(BOLD + "Triage Status" + RESET)
   console.log()
 
-  if (showLocal) {
-    const localCmd = fs.existsSync(LOCAL_CMD_FILE)
-    console.log(`  Project:`)
-    console.log(`    plugin:   ${localActive ? GREEN + "ACTIVE" + RESET : "inactive"}  (opencode.json)`)
-    console.log(`    skills:   ${projDisabled} hidden · ${projActive} exposed · ${projDisabled + projActive} total`)
-    console.log(`    command:  ${localCmd ? GREEN + "found" + RESET : "not found"}  (.opencode/commands/triage.md)`)
-    console.log()
-  }
+  const localCmd = fs.existsSync(LOCAL_CMD_FILE)
+  console.log(`  Project:`)
+  console.log(`    plugin:   ${localActive ? GREEN + "ACTIVE" + RESET : "inactive"}  (opencode.json)`)
+  console.log(`    skills:   ${projDisabled} hidden · ${projActive} exposed · ${projDisabled + projActive} total`)
+  console.log(`    command:  ${localCmd ? GREEN + "found" + RESET : "not found"}  (.opencode/commands/triage.md)`)
+  console.log()
 
-  if (showGlobal) {
-    const globalCmd = fs.existsSync(GLOBAL_CMD_FILE)
-    console.log(`  Global:`)
-    console.log(`    plugin:   ${globalActive ? GREEN + "ACTIVE" + RESET : "inactive"}  (~/.config/opencode/opencode.jsonc)`)
-    console.log(`    skills:   ${gloDisabled} hidden · ${gloActive} exposed · ${gloDisabled + gloActive} total`)
-    console.log(`    command:  ${globalCmd ? GREEN + "found" + RESET : "not found"}  (~/.config/opencode/commands/triage.md)`)
-    console.log()
-  }
+  const globalCmd = fs.existsSync(GLOBAL_CMD_FILE)
+  console.log(`  Global:`)
+  console.log(`    plugin:   ${globalActive ? GREEN + "ACTIVE" + RESET : "inactive"}  (~/.config/opencode/opencode.jsonc)`)
+  console.log(`    skills:   ${gloDisabled} hidden · ${gloActive} exposed · ${gloDisabled + gloActive} total`)
+  console.log(`    command:  ${globalCmd ? GREEN + "found" + RESET : "not found"}  (~/.config/opencode/commands/triage.md)`)
+  console.log()
 
-  // Display total scoped to the current view
-  const dispDisabled = scope === "global" ? gloDisabled : scope === "local" ? projDisabled : totalDisabled
-  const dispActive = scope === "global" ? gloActive : scope === "local" ? projActive : totalActive
-  const dispTotal = dispDisabled + dispActive
-  const savedTokens = dispDisabled * 50
-  console.log(`Totals:   ${dispDisabled} hidden  · ${dispActive} exposed  · ${dispTotal} skills`)
-  console.log(`          ~${savedTokens} tokens saved from prompt`)
+  console.log(`Totals:   ${totalDisabled} hidden  · ${totalActive} exposed  · ${totalDisabled + totalActive} skills`)
+  console.log(`          ~${totalDisabled * 50} tokens saved from prompt`)
 
-  if (!scope && dispTotal > 0 && skillLines.length > 0) {
+  if (skillLines.length > 0) {
     console.log()
     skillLines.forEach(l => console.log(l))
   }
-  if (dispTotal === 0) {
+  if (totalDisabled + totalActive === 0) {
     console.log()
     console.log("(no skills found)")
     console.log()
@@ -323,9 +349,22 @@ function showStatus(scope) {
 
 // ── compare ───────────────────────────────────────────────
 
+function estimateTokens(text) {
+  // Rough estimate: ~4 chars per token for English text
+  return Math.ceil(text.length / 4)
+}
+
+function readSkillContent(dirPath) {
+  const disabled = path.join(dirPath, "SKILL.md.disabled")
+  const active = path.join(dirPath, "SKILL.md")
+  const file = fs.existsSync(disabled) ? disabled : fs.existsSync(active) ? active : null
+  if (!file) return { content: "", filePath: null }
+  try { return { content: fs.readFileSync(file, "utf-8"), filePath: file } } catch { return { content: "", filePath: null } }
+}
+
 function showCompare() {
-  let hiddenCount = 0
-  let exposedCount = 0
+  const hiddenSkills = []
+  const exposedSkills = []
 
   for (const { base } of SKILL_DIRS) {
     if (!fs.existsSync(base)) continue
@@ -335,12 +374,17 @@ function showCompare() {
       if (d.isSymbolicLink()) continue
       if (d.name === "triage") continue
       if (d.name.includes(path.sep) || d.name === ".." || d.name === ".") continue
-      if (fs.existsSync(path.join(base, d.name, "SKILL.md.disabled"))) hiddenCount++
-      else if (fs.existsSync(path.join(base, d.name, "SKILL.md"))) exposedCount++
+      const dirPath = path.join(base, d.name)
+      const hasDisabled = fs.existsSync(path.join(dirPath, "SKILL.md.disabled"))
+      const hasActive = fs.existsSync(path.join(dirPath, "SKILL.md"))
+      const { content, filePath } = readSkillContent(dirPath)
+      const entry = { name: d.name, content, filePath, tokens: estimateTokens(content) }
+      if (hasDisabled) hiddenSkills.push(entry)
+      else if (hasActive) exposedSkills.push(entry)
     }
   }
 
-  const total = hiddenCount + exposedCount
+  const total = hiddenSkills.length + exposedSkills.length
   if (total === 0) {
     console.log()
     console.log("No skills found. Nothing to compare.")
@@ -350,47 +394,73 @@ function showCompare() {
     return
   }
 
-  const MSGS = 10
-  const LOOKUPS = 5
-  const withBaseline = 40
-  const withoutBaseline = total * 50
-  const withLookupCost = 55
-  const withoutLookupCost = 210
+  // Measure actual tool definition text from source
+  const TOOL_DEF_TEXT =
+    "Discover and route to the right specialized skill. " +
+    "Call this before any non-trivial task. " +
+    "Pass a brief description. Returns the best match or a list of candidates." +
+    "Brief description of what you need help with, e.g. 'backup my database'"
+  const toolDefTokens = estimateTokens(TOOL_DEF_TEXT)
 
-  const withIdle = MSGS * withBaseline
-  const withoutIdle = MSGS * withoutBaseline
-  const withLookups = LOOKUPS * withLookupCost
-  const withoutLookups = LOOKUPS * withoutLookupCost
+  // Measure frontmatter tokens for all skills (what goes into prompt without triage)
+  const allSkillsFmTokens = hiddenSkills.concat(exposedSkills).reduce((sum, s) => {
+    const fmPreview = s.content.slice(0, 500)
+    return sum + estimateTokens(fmPreview)
+  }, 0)
 
-  const withTotal = withIdle + withLookups
-  const withoutTotal = withoutIdle + withoutLookups
-  const tokenSaved = withoutTotal - withTotal
-  const tokenPct = withoutTotal > 0 ? Math.round((tokenSaved / withoutTotal) * 100) : 0
+  // Measure single skill read cost (what triage pays per lookup)
+  const sampleSkill = hiddenSkills[0] || exposedSkills[0]
+  const sampleContent = sampleSkill.content
+  const fmEnd = sampleContent.indexOf("\n---", 4)
+  const fmContent = fmEnd !== -1 ? sampleContent.slice(4, fmEnd) : sampleContent.slice(0, 500)
+  const singleSkillTokens = estimateTokens(fmContent)
 
-  const withTime = MSGS * 0.01 + LOOKUPS * 0.4
-  const withoutTime = MSGS * 0.1 + LOOKUPS * 2.0
+  // Benchmark: time to read one skill file from disk (triage path)
+  const samplePath = sampleSkill.filePath
+  const t0 = process.hrtime.bigint()
+  fs.readFileSync(samplePath, "utf-8")
+  const t1 = process.hrtime.bigint()
+  const singleReadMs = Number(t1 - t0) / 1_000_000
+
+  // Benchmark: time to read all skill files (without triage path)
+  const t2 = process.hrtime.bigint()
+  for (const { base } of SKILL_DIRS) {
+    if (!fs.existsSync(base)) continue
+    const dirs = fs.readdirSync(base, { withFileTypes: true })
+    for (const d of dirs) {
+      if (!d.isDirectory()) continue
+      if (d.isSymbolicLink()) continue
+      if (d.name === "triage") continue
+      readSkillContent(path.join(base, d.name)).content
+    }
+  }
+  const t3 = process.hrtime.bigint()
+  const allReadMs = Number(t3 - t2) / 1_000_000
+
+  // Per-call comparison
+  const withoutCost = allSkillsFmTokens  // all skills in prompt
+  const withCost = toolDefTokens + singleSkillTokens  // tool def + one skill read
+  const saved = withoutCost - withCost
+  const pct = withoutCost > 0 ? Math.round((saved / withoutCost) * 100) : 0
 
   const pad = (s, w) => String(s).padEnd(w)
 
   console.log()
   console.log(BOLD + "Cost Comparison" + RESET)
   console.log()
-  console.log(`Skills: ${hiddenCount} hidden · ${exposedCount} exposed · ${total} total`)
-  console.log(`Model:  ${MSGS} messages, ${LOOKUPS} skill lookups per session`)
+  console.log(`Skills: ${hiddenSkills.length} hidden · ${exposedSkills.length} exposed · ${total} total`)
   console.log()
   console.log(pad("", 24) + pad("WITH triage", 22) + pad("WITHOUT", 22))
   console.log(pad("──────────────────", 24) + pad("────────────────────", 22) + pad("────────────────────", 22))
-  console.log(pad("Baseline per msg", 24) + pad(withBaseline + " tokens", 22) + pad(withoutBaseline + " tokens", 22))
-  console.log(pad("Per lookup", 24) + pad(withLookupCost + " tokens", 22) + pad(withoutLookupCost + " tokens", 22))
+  console.log(pad("Prompt per call", 24) + pad(withCost + " tokens", 22) + pad(withoutCost + " tokens", 22))
+  console.log(pad("  Tool definition", 24) + pad(toolDefTokens + " tokens", 22) + pad("0 tokens", 22))
+  console.log(pad("  Skill read", 24) + pad(singleSkillTokens + " tokens", 22) + pad(allSkillsFmTokens + " tokens", 22))
   console.log(pad("──────────────────", 24) + pad("────────────────────", 22) + pad("────────────────────", 22))
-  console.log(pad(`${MSGS} idle messages`, 24) + pad(withIdle + " tokens", 22) + pad(withoutIdle + " tokens", 22))
-  console.log(pad(`${LOOKUPS} skill lookups`, 24) + pad(withLookups + " tokens", 22) + pad(withoutLookups + " tokens", 22))
-  console.log(pad("──────────────────", 24) + pad("────────────────────", 22) + pad("────────────────────", 22))
-  console.log(BOLD + pad("Session total", 24) + pad(withTotal + " tokens", 22) + pad(withoutTotal + " tokens", 22) + RESET)
-  console.log(pad("Session time", 24) + pad(withTime.toFixed(1) + "s", 22) + pad(withoutTime.toFixed(1) + "s", 22))
-  console.log(pad("──────────────────", 24) + pad("────────────────────", 22) + pad("────────────────────", 22))
+  console.log(BOLD + pad("Saved per call", 24) + pad(saved + " tokens (" + pct + "%)", 22) + RESET)
   console.log()
-  console.log(GREEN + BOLD + `Saved: ${tokenSaved} tokens (${tokenPct}%)` + RESET)
+  console.log(`Time: ${singleReadMs.toFixed(1)}ms (triage) vs ${allReadMs.toFixed(1)}ms (all skills)`)
+  console.log()
+  console.log("Token counts measured from actual skill files. Timing from filesystem benchmarks.")
   console.log()
 }
 
@@ -439,20 +509,22 @@ function showHelp() {
   console.log()
   console.log(BOLD + "opencode-triage v" + CURRENT_VERSION + RESET + " -- Deterministic Skill Router")
   console.log()
-  console.log("  on              Hide skills from prompt, enable triage (restart after)")
+  console.log("  on              Hide global skills from prompt, enable triage (restart after)")
   console.log("  on --local      Enable only in current project")
-  console.log("  off             Expose skills, disable triage (restart after)")
+  console.log("  on --both       Enable in both scopes (global + local)")
+  console.log("  off             Expose global skills, disable triage (restart after)")
   console.log("  off --local     Disable only in current project")
+  console.log("  off --both      Disable in both scopes")
   console.log("  status          Show active/hidden skills + token estimate")
-  console.log("  status --global Show only global scope")
-  console.log("  status --local  Show only local scope")
   console.log("  compare         Token/time cost comparison")
   console.log("  version         Show version and check for updates")
   console.log("  help            Show this help")
   console.log()
   console.log(BOLD + "MORE" + RESET)
   console.log()
-  console.log("  " + BOLD + "Scopes:" + RESET + "     No flag defaults to global (system-wide). Use --local for current project.")
+  console.log("  " + BOLD + "Scopes:" + RESET + "     on/off default to global. Use --local or --both.")
+  console.log("  " + BOLD + "Examples:" + RESET + "  /triage on --both        Enable triage everywhere")
+  console.log("  " + BOLD + "  " + RESET + "            /triage off --both       Disable everywhere")
   console.log("  " + BOLD + "Uninstall:" + RESET + "  npm uninstall -g opencode-triage  (or --save-dev)")
   console.log("  " + BOLD + "Docs:" + RESET + "      https://github.com/cascharly/opencode-triage")
   console.log()

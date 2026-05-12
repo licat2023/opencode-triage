@@ -1,6 +1,6 @@
 # opencode-triage
 
-> Deterministic skill router for OpenCode. Save up to 94% of tokens **on skills** by hiding them from the system prompt and loading only when needed.
+> Deterministic skill router for OpenCode. Save up to 90% of tokens **on skills** by hiding them from the system prompt and loading only when needed.
 
 ## What It Does
 
@@ -61,12 +61,14 @@ Install opencode-triage (https://github.com/cascharly/opencode-triage) — a det
 |---|---|
 | `/triage on` | Hide global skills |
 | `/triage on --local` | Hide this project's skills only |
+| `/triage on --both` | Hide skills in both scopes (global + local) |
 | `/triage off` | Expose global skills again |
 | `/triage off --local` | Expose this project's skills again |
+| `/triage off --both` | Expose skills in both scopes |
 | `/triage status` | See what's hidden and what's exposed |
 | `/triage compare` | Token savings estimate for your skills |
 
-All commands can also be run directly in your terminal via `npx opencode-triage <command>` (e.g., `npx opencode-triage on --local`). No OpenCode session needed.
+All commands can also be run directly in your terminal via `npx opencode-triage <command>` (e.g., `npx opencode-triage on --local`, `npx opencode-triage on --both`). No OpenCode session needed.
 
 Global affects `~/.config/opencode/skills/`, `~/.claude/skills/`, `~/.agents/skills/`.
 Local affects `.opencode/skills/`, `.claude/skills/`, `.agent/skills/`, `.agents/skills/` in the current project.
@@ -80,7 +82,7 @@ With a global skill A and a project skill B:
 | Full exposure | exposed | exposed | (default) |
 | Triage in project only | exposed | hidden | `/triage on --local` |
 | Triage globally only | hidden | exposed | `/triage on` |
-| Full triage | hidden | hidden | `/triage on` then `/triage on --local` |
+| Full triage | hidden | hidden | `/triage on --both` (or `/triage on` then `/triage on --local`) |
 
 ## How It Works
 
@@ -160,11 +162,14 @@ This means adding a new skill to your triage-managed setup is as simple as creat
 
 ## Token Savings (skills only)
 
+Example with `context7-mcp` skill (~642 tokens):
+
 | | Without Triage | With Triage |
 |---|---|---|
-| Skills in prompt (per msg, 20 skills) | ~1,000 | ~40 |
-| Session total (10 msgs, 5 lookups) | ~11,050 | ~675 |
-| **Savings** | — | **~94%** |
+| **Prompt per call** | 642 tokens | 59 tokens |
+| Tool definition | 0 tokens | 59 tokens |
+| Skill content | 642 tokens | 0 tokens |
+| **Saved per call** | — | **583 tokens (91%)** |
 
 Run `/triage compare` for live numbers based on your skill inventory.
 
@@ -172,7 +177,7 @@ Run `/triage compare` for live numbers based on your skill inventory.
 
 Triage renames `SKILL.md` → `SKILL.md.disabled` on disk. Other AI tools that scan the same directories (Claude Code, Cursor, Windsurf) will not see them either — the skills are hidden from all tools. Run `/triage off` to restore.
 
-Use `/triage on --local` to isolate triage to one project without affecting global skills.
+Use `/triage on --local` to isolate triage to one project without affecting global skills. Use `/triage on --both` to enable triage in all scopes at once.
 
 ## Uninstall
 

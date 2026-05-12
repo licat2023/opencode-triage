@@ -5,6 +5,27 @@ All notable changes to opencode-triage are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.7] — 2026-05-12
+
+### Added
+- `--both` flag for `/triage on` and `/triage off` to toggle both scopes simultaneously
+- `/triage on --both` — hides skills in both global and local scopes
+- `/triage off --both` — exposes skills in both global and local scopes
+- `--both` documentation in README, AGENTS.md, and CLI help text
+
+### Changed
+- `toggle()` function now supports a third scope value (`"both"`) that iterates both global and local scopes
+- Help text updated with `--both` examples and scope descriptions
+- `readSkillContent()` returns `{ content, filePath }` object for benchmark accuracy
+- `CMD_TEMPLATE` uses `npx -y opencode-triage` for cross-platform compatibility (was hardcoded Windows path)
+- `updateGlobalConfig()` now scopes plugin removal to `"plugin"` array context only
+
+### Fixed
+- `showCompare` estimate benchmark (`indexOf` → real `fs.readFileSync`)
+- `showCompare` benchmark loop missing symlink guard
+- `extractFrontmatter` key param not escaped in regex (latent ReDoS)
+- `safeRenameSync` redundant symlink check removed (caller already guards)
+
 ## [1.2.6] — 2026-05-12
 
 ### Added

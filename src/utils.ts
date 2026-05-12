@@ -120,7 +120,8 @@ export function extractFrontmatter(content: string, key: string): string | null 
 
   // Try folded block syntax first: `key: >` followed by indented lines
   // The regex captures everything after `>` until a non-indented line or end
-  const multiRe = new RegExp(`^${key}:\\s*>(.+?)(?=\\r?\\n\\S|$)`, "sm")
+  const safeKey = escapeRegex(key)
+  const multiRe = new RegExp(`^${safeKey}:\\s*>(.+?)(?=\\r?\\n\\S|$)`, "sm")
   const multiMatch = fm.match(multiRe)
   if (multiMatch) {
     // Collapse multi-line folded text into a single space-separated line
@@ -128,7 +129,7 @@ export function extractFrontmatter(content: string, key: string): string | null 
   }
 
   // Fall back to single-line syntax: `key: value`
-  const singleRe = new RegExp(`^${key}:\\s*(.+)$`, "m")
+  const singleRe = new RegExp(`^${safeKey}:\\s*(.+)$`, "m")
   const singleMatch = fm.match(singleRe)
   return singleMatch ? singleMatch[1].trim() : null
 }

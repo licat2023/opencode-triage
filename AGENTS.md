@@ -28,13 +28,15 @@ No test runner, no linter, no formatter config. No tsconfig.json in repo.
 
 ## CLI behavior
 
-- Default scope is **global**. Use `--local` flag for project-level.
-- `/triage on` — hides global skills, registers plugin globally
-- `/triage on --local` — hides project skills, registers plugin locally
-- `/triage off` — exposes global skills, unregisters plugin globally
-- `/triage off --local` — exposes project skills, unregisters plugin locally
-- `/triage status` — shows plugin state per scope
-- Each scope is independent — 4 possible combinations
+- Default scope is **global**. Use `--local` flag for project-level, `--both` for both.
+- `/triage on` — hides global skills
+- `/triage on --local` — hides project skills
+- `/triage on --both` — hides skills in both global and local scopes
+- `/triage off` — exposes global skills
+- `/triage off --local` — exposes project skills
+- `/triage off --both` — exposes skills in both global and local scopes
+- `/triage status` — shows plugin state + all skills (project + global)
+- Each scope is independent — 4 possible combinations (or use `--both` for atomic toggle)
 - Always requires restart after toggle
 
 ## Postinstall
