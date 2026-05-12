@@ -1,7 +1,7 @@
 /*
  * opencode-triage — Skill Router Plugin
  * ======================================
- * Version: 1.0.0
+ * Version: 1.2.5
  * License: MIT
  *
  * Deterministic skill routing for OpenCode. Registers a `triage()` custom tool
@@ -16,31 +16,36 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import { homedir } from "node:os"
-import { join, basename, sep } from "node:path"
+import { join, basename } from "node:path"
 import { readdir, readFile, realpath } from "node:fs/promises"
-
-// ── Configuration ──────────────────────────────────────────
-
-const THRESHOLD = 30
-const MIN_WORD_LENGTH = 3
-const NAME_WEIGHT = 3
-const DESC_WEIGHT = 1
-
-interface SkillEntry {
-  name: string
-  desc: string
-  path: string
-  scope: "project" | "global"
-}
-
-interface ScoredSkill extends SkillEntry {
-  score: number
-  matchedBy: string
-}
+import notify from "./notify.js"
+import {
+  THRESHOLD,
+  MIN_WORD_LENGTH,
+  NAME_WEIGHT,
+  DESC_WEIGHT,
+  MAX_SKILL_SIZE,
+  stripBOM,
+  extractFrontmatter,
+  scoreSkills,
+  getWordBonus,
+  escapeRegex,
+  isValidSkillName,
+} from "./utils.js"
+import type { SkillEntry, ScoredSkill } from "./utils.js"
 
 // Exclude the triage skill itself — self-referencing would create infinite loops
 const EXCLUDED_SKILLS = new Set(["triage"])
 
+/**
+ * Builds the list of directories to scan for skill files.
+ *
+ * Searches both project-level (`.agent/`, `.agents/`, `.claude/`, `.opencode/`)
+ * and global (`~/.agents/`, `~/.claude/`, `~/.config/opencode/`) skills directories.
+ * Project skills take precedence over global skills of the same name.
+ *
+ * @param worktree - Git worktree root or current working directory
+ */
 function buildSkillLocations(worktree: string) {
   return [
     { base: join(worktree, ".agent", "skills"), scope: "project" as const },
@@ -53,9 +58,14 @@ function buildSkillLocations(worktree: string) {
   ]
 }
 
-// ── Plugin ────────────────────────────────────────────────
-
-export const server: Plugin = async ({ worktree }) => {
+/**
+ * Triage skill router plugin — main entry point.
+ *
+ * Registers the `triage` and `notify` custom tools, plus a
+ * `tool.execute.after` hook that renders TUI toasts for routing
+ * results and explicit notification calls.
+ */
+export const server: Plugin = async ({ worktree, client }) => {
   // Cache: discovered skills per worktree
   let cache: SkillEntry[] | null = null
 
@@ -147,12 +157,78 @@ export const server: Plugin = async ({ worktree }) => {
           return lines.join("\n")
         },
       }),
+      notify,
+    },
+    // ── Notification routing ────────────────────────────
+    // Catches triage results and notify() calls to show TUI toasts.
+    // First-line pattern matching avoids parsing the full result.
+    // Body isolation prevents false positives on content issue detection.
+    "tool.execute.after": async (input, output) => {
+      const result = output.output
+      if (typeof result !== "string") return
+      if (input.tool === "triage") {
+        const first = result.split("\n")[0] ?? ""
+        if (first.startsWith("SKILL ROUTED:")) {
+          const skillName = first.replace("SKILL ROUTED:", "").trim()
+          await client.tui.showToast({
+            body: { message: `Loaded: ${skillName}`, variant: "success" },
+          })
+          const bodyIndex = result.indexOf("\n\n")
+          if (bodyIndex !== -1) {
+            const body = result.slice(bodyIndex + 2).trimStart()
+            if (body.startsWith("(skill content truncated")) {
+              await client.tui.showToast({
+                body: { message: `Skill "${skillName}" exceeds 1MB limit — truncated`, variant: "warning" },
+              })
+            } else if (body.startsWith("(skill content unavailable")) {
+              await client.tui.showToast({
+                body: { message: `Could not read skill file for "${skillName}"`, variant: "error" },
+              })
+            }
+          }
+        } else if (first.startsWith("Multiple matches")) {
+          await client.tui.showToast({
+            body: { message: "Multiple skills matched — narrow your query", variant: "info" },
+          })
+        } else if (first.startsWith("No skill matches")) {
+          await client.tui.showToast({
+            body: { message: "No matching skill found — try different keywords", variant: "error" },
+          })
+        } else if (first.startsWith("No skills installed")) {
+          await client.tui.showToast({
+            body: { message: "No skills installed — add SKILL.md files to get started", variant: "info" },
+          })
+        }
+      }
+      if (input.tool === "notify") {
+        const args = input.args as { message?: string; variant?: string }
+        if (args.message) {
+          await client.tui.showToast({
+            body: {
+              message: args.message,
+              variant: (args.variant as "info" | "success" | "error" | "warning") ?? "info",
+            },
+          })
+        }
+      }
     },
   }
 }
 
 // ── Discovery ─────────────────────────────────────────────
 
+/**
+ * Discovers all skills from the provided filesystem locations.
+ *
+ * Resolves symlinks, enumerates subdirectories, reads frontmatter from
+ * SKILL.md.disabled (priority) and SKILL.md files, deduplicates by name,
+ * and sorts project skills before global ones.
+ *
+ * Non-ENOENT errors are logged to stderr but do not halt discovery.
+ *
+ * @param locations - Array of {base, scope} directory pairs to scan
+ * @returns Deduplicated, sorted array of discovered skills
+ */
 async function discoverAllSkills(
   locations: { base: string; scope: "project" | "global" }[]
 ): Promise<SkillEntry[]> {
@@ -167,7 +243,7 @@ async function discoverAllSkills(
         if (!entry.isDirectory()) continue
         if (entry.isSymbolicLink()) continue
         if (EXCLUDED_SKILLS.has(entry.name)) continue
-        if (entry.name.includes(sep) || entry.name === ".." || entry.name === ".") continue
+        if (!isValidSkillName(entry.name)) continue
 
         const result = await tryReadSkill(join(resolvedBase, entry.name))
         if (result && !seen.has(result.name)) {
@@ -190,8 +266,17 @@ async function discoverAllSkills(
   return skills
 }
 
-// Tries SKILL.md.disabled first (triage-managed), then SKILL.md (exposed).
-// Disabled skills take priority so triage routing works even when skills are exposed.
+/**
+ * Attempts to read a skill definition from a directory.
+ *
+ * Checks SKILL.md.disabled first (triage-managed, hidden from system prompt),
+ * then SKILL.md (exposed to system prompt). Disabled files take priority so
+ * the triage router can still find and load skills even when they are hidden
+ * from the agent's context.
+ *
+ * @param skillDir - Absolute path to a skill subdirectory
+ * @returns Parsed skill entry (without scope), or null if neither file exists
+ */
 async function tryReadSkill(
   skillDir: string
 ): Promise<Omit<SkillEntry, "scope"> | null> {
@@ -208,72 +293,16 @@ async function tryReadSkill(
   return null
 }
 
-function stripBOM(content: string): string {
-  if (content.charCodeAt(0) === 0xFEFF) return content.slice(1)
-  return content
-}
-
-function extractFrontmatter(content: string, key: string): string | null {
-  const clean = stripBOM(content)
-  const fmEnd = clean.indexOf("\n---", 4)
-  if (fmEnd === -1) return null
-  const fm = clean.slice(4, fmEnd)
-
-  const multiRe = new RegExp(`^${key}:\\s*>(.+?)(?=\\r?\\n\\S|$)`, "sm")
-  const multiMatch = fm.match(multiRe)
-  if (multiMatch) {
-    return multiMatch[1].replace(/\n\s*/g, " ").trim()
-  }
-
-  const singleRe = new RegExp(`^${key}:\\s*(.+)$`, "m")
-  const singleMatch = fm.match(singleRe)
-  return singleMatch ? singleMatch[1].trim() : null
-}
-
-// ── Scoring ───────────────────────────────────────────────
-
-function scoreSkills(query: string, skills: SkillEntry[]): ScoredSkill[] {
-  const words = query.toLowerCase()
-    .split(/\s+/)
-    .map(w => w.replace(/[^\p{L}\p{N}]/gu, ""))
-    .filter(w => w.length >= MIN_WORD_LENGTH)
-
-  if (words.length === 0) return []
-
-  return skills.map(skill => {
-    const nameLower = skill.name.toLowerCase()
-    const descLower = skill.desc.toLowerCase()
-    let score = 0
-    const matched: string[] = []
-
-    for (const word of words) {
-      const bonus = getWordBonus(word, nameLower)
-      if (bonus > 0) { score += NAME_WEIGHT * bonus; matched.push(`name:${word}`) }
-    }
-    for (const word of words) {
-      const bonus = getWordBonus(word, descLower)
-      if (bonus > 0) { score += DESC_WEIGHT * bonus; matched.push(`desc:${word}`) }
-    }
-
-    return { ...skill, score, matchedBy: matched.join(", ") }
-  })
-}
-
-function getWordBonus(word: string, target: string): number {
-  const re = new RegExp(`\\b${escapeRegex(word)}\\b`, "i")
-  if (re.test(target)) return 15
-  if (target.includes(word)) return 10
-  return 0
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")
-}
-
-const MAX_SKILL_SIZE = 1024 * 1024 // 1MB
-
-// Reads a skill file, strips frontmatter, and returns only the body content.
-// Enforces 1MB size limit and handles BOM stripping for Windows compatibility.
+/**
+ * Reads a skill file, strips YAML frontmatter, returns body content.
+ *
+ * Enforces a 1MB size limit to prevent memory exhaustion. Strips UTF-8
+ * BOM for Windows compatibility. Returns error strings on failure rather
+ * than throwing, so the triage tool always returns a usable string.
+ *
+ * @param filePath - Absolute path to SKILL.md or SKILL.md.disabled
+ * @returns Body content without frontmatter, or an error string
+ */
 async function readSkillContent(filePath: string): Promise<string> {
   try {
     const content = await readFile(filePath, "utf-8")
