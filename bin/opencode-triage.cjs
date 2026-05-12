@@ -32,7 +32,7 @@ const HOMEDIR = os.homedir()
 const CMD_TEMPLATE = `---
 description: Toggle, inspect, and benchmark the triage skill router
 ---
-Run npx -y opencode-triage $ARGUMENTS and show the output verbatim.
+Run node "%USERPROFILE%\.config\opencode\node_modules\opencode-triage\bin\opencode-triage.cjs" $ARGUMENTS and show the output verbatim.
 If output contains "Restart opencode", tell the user to restart.
 `
 const LOCAL_CFG_PATH  = path.join(WORKTREE, ".opencode", "opencode.json")

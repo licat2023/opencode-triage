@@ -38,6 +38,7 @@ interface ScoredSkill extends SkillEntry {
   matchedBy: string
 }
 
+// Exclude the triage skill itself — self-referencing would create infinite loops
 const EXCLUDED_SKILLS = new Set(["triage"])
 
 function buildSkillLocations(worktree: string) {
@@ -86,9 +87,17 @@ export const server: Plugin = async ({ worktree }) => {
               "No skills installed.",
               "",
               "To add a skill:",
-              "  .opencode/skills/<name>/SKILL.md",
-              "  .agent/skills/<name>/SKILL.md",
-              "  .agents/skills/<name>/SKILL.md",
+              "",
+              "  Project:",
+              "    .opencode/skills/<name>/SKILL.md",
+              "    .claude/skills/<name>/SKILL.md",
+              "    .agent/skills/<name>/SKILL.md",
+              "    .agents/skills/<name>/SKILL.md",
+              "",
+              "  Global:",
+              "    ~/.config/opencode/skills/<name>/SKILL.md",
+              "    ~/.claude/skills/<name>/SKILL.md",
+              "    ~/.agents/skills/<name>/SKILL.md",
               "",
               "Use /triage status to verify your setup.",
             ].join("\n")
@@ -111,6 +120,7 @@ export const server: Plugin = async ({ worktree }) => {
             return `No skill matches "${query}". Try different keywords.`
           }
 
+          // Confidence gap: top match vs runner-up. Large gap = clear winner
           const gap = scored[0].score - (scored[1]?.score ?? 0)
 
           if (gap >= THRESHOLD || scored.length === 1) {
@@ -180,6 +190,8 @@ async function discoverAllSkills(
   return skills
 }
 
+// Tries SKILL.md.disabled first (triage-managed), then SKILL.md (exposed).
+// Disabled skills take priority so triage routing works even when skills are exposed.
 async function tryReadSkill(
   skillDir: string
 ): Promise<Omit<SkillEntry, "scope"> | null> {
@@ -260,6 +272,8 @@ function escapeRegex(s: string): string {
 
 const MAX_SKILL_SIZE = 1024 * 1024 // 1MB
 
+// Reads a skill file, strips frontmatter, and returns only the body content.
+// Enforces 1MB size limit and handles BOM stripping for Windows compatibility.
 async function readSkillContent(filePath: string): Promise<string> {
   try {
     const content = await readFile(filePath, "utf-8")

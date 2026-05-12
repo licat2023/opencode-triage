@@ -2,26 +2,6 @@
 
 > Deterministic skill router for OpenCode. Save up to 94% of tokens **on skills** by hiding them from the system prompt and loading only when needed.
 
-## Quick Start
-
-```bash
-npm install -g opencode-triage
-```
-
-Restart OpenCode, then type `/triage on`. That's it.
-
-## LLM Quick-Install
-
-Copy-paste this into any LLM:
-
-```text
-Install opencode-triage (https://github.com/cascharly/opencode-triage) — a deterministic skill router for OpenCode.
-
-1. Run: npm install -g opencode-triage
-2. If any errors occur, visit the repo link above and resolve them.
-3. Tell me to restart OpenCode.
-```
-
 ## What It Does
 
 **This plugin saves tokens on skills only.** The rest of your system prompt (instructions, tools, etc.) is untouched.
@@ -34,6 +14,16 @@ With triage: triage({ query }) → finds the right skill → returns it only whe
 ```
 
 Skills are renamed from `SKILL.md` → `SKILL.md.disabled` to hide them from OpenCode's discovery. Run `/triage off` to restore.
+
+Since only the matched skill is loaded at lookup time, you can install virtually unlimited skills without burning any tokens on idle ones.
+
+## Quick Start
+
+```bash
+npm install -g opencode-triage
+```
+
+Restart OpenCode, then type `/triage on`. That's it.
 
 ## Install
 
@@ -53,19 +43,33 @@ npm install opencode-triage
 
 Restart OpenCode. `/triage` is available only in this project. Type `/triage on --local` to enable.
 
+## LLM Quick-Install
+
+Copy-paste this into any LLM:
+
+```text
+Install opencode-triage (https://github.com/cascharly/opencode-triage) — a deterministic skill router for OpenCode.
+
+1. Run: npm install -g opencode-triage
+2. If any errors occur, visit the repo link above and resolve them.
+3. Tell me to restart OpenCode.
+```
+
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `/triage on` | Hide global skills |
-| `/triage on --local` | Hide project skills for this project |
-| `/triage off` | Show global skills again |
-| `/triage off --local` | Show project skills again |
-| `/triage status` | See what's hidden and what's active |
+| `/triage on --local` | Hide this project's skills only |
+| `/triage off` | Expose global skills again |
+| `/triage off --local` | Expose this project's skills again |
+| `/triage status` | See what's hidden and what's exposed |
 | `/triage compare` | Token savings estimate for your skills |
 
-Global affects `~/.config/opencode/skills/`, `~/.claude/skills/`, `~/.agent/skills/`.
-Local affects `.opencode/skills/`, `.claude/skills/`, `.agent/skills/` in the current project.
+All commands can also be run directly in your terminal via `npx opencode-triage <command>` (e.g., `npx opencode-triage on --local`). No OpenCode session needed.
+
+Global affects `~/.config/opencode/skills/`, `~/.claude/skills/`, `~/.agents/skills/`.
+Local affects `.opencode/skills/`, `.claude/skills/`, `.agent/skills/`, `.agents/skills/` in the current project.
 
 ### Configuration Combinations
 
@@ -73,9 +77,9 @@ With a global skill A and a project skill B:
 
 | State | Global (A) | Project (B) | How to configure |
 |---|---|---|---|
-| Full visibility | visible | visible | (default) |
-| Triage in project only | visible | hidden | `/triage on --local` |
-| Triage globally only | hidden | visible | `/triage on` |
+| Full exposure | exposed | exposed | (default) |
+| Triage in project only | exposed | hidden | `/triage on --local` |
+| Triage globally only | hidden | exposed | `/triage on` |
 | Full triage | hidden | hidden | `/triage on` then `/triage on --local` |
 
 ## How It Works
@@ -97,6 +101,63 @@ Plugin: scans filesystem → scores skills → returns best match
 
 No LLM reasoning overhead. No extra API calls. Just fast deterministic matching.
 
+### Why "Triage"?
+
+In emergency medicine, a triage nurse quickly assesses each patient's condition and routes them to the right specialist — never loading every patient into every doctor's office at once. Same idea here.
+
+
+## Under the Hood
+
+### Plugin Activation
+
+`opencode-triage` is a standard opencode plugin registered in the `"plugin"` array of `opencode.json` (both `~/.config/opencode/opencode.jsonc` globally and `.opencode/opencode.json` per-project). On startup, opencode loads all listed plugins, making their tools and commands available. The plugin registers the `triage` tool in the system prompt alongside `read`, `write`, `bash`, etc.
+
+### How Hiding Skills Works
+
+Skills live in up to seven directories:
+
+| Path | Scope |
+|------|-------|
+| `.opencode/skills/<name>/` | Project |
+| `.claude/skills/<name>/` | Project |
+| `.agent/skills/<name>/` | Project |
+| `.agents/skills/<name>/` | Project |
+| `~/.config/opencode/skills/<name>/` | Global |
+| `~/.claude/skills/<name>/` | Global |
+| `~/.agents/skills/<name>/` | Global |
+
+When you run `/triage on`, the CLI renames every `SKILL.md` to `SKILL.md.disabled` across all seven directories. OpenCode's system prompt only loads files named `SKILL.md` (not `.disabled`), so all skills disappear from the prompt instantly.
+
+```
+Before (/triage on):
+  .agent/skills/backup-restore/SKILL.md          ← loaded into prompt
+  ~/.agents/skills/database-sync/SKILL.md        ← loaded into prompt
+
+After (/triage on):
+  .agent/skills/backup-restore/SKILL.md.disabled  ← hidden
+  ~/.agents/skills/database-sync/SKILL.md.disabled ← hidden
+```
+
+`/triage off` reverses the operation — it renames every `SKILL.md.disabled` back to `SKILL.md`, restoring native discovery.
+
+The `/triage status` command detects the current state by scanning all seven directories for both `.md` and `.md.disabled` extensions, comparing counts to determine which skills are hidden vs exposed.
+
+### The Triage Skill Itself
+
+The triage router is itself a skill living at `~/.agents/skills/triage/SKILL.md.disabled`. It's the only skill the system prompt lists in `<available_skills>`. Its instructions define a deterministic 5-step protocol:
+
+1. **Discover** — Runs a PowerShell script that globs `*SKILL.md*` under all seven directories, extracts the `description:` YAML frontmatter from each file, and prints a table of names + descriptions.
+
+2. **Match** — Compares the user's natural language request against each skill's name and description using keyword scoring (same algorithm described above). Picks the most specific match, or returns a shortlist if confidence is low (gap < 30).
+
+3. **Load** — Uses the `read` tool to load the matched skill's full instructions from its `SKILL.md.disabled` file.
+
+4. **Follow** — Executes the loaded instructions step by step.
+
+5. **No Match** — Informs the user that no skill matched and offers to create a new one.
+
+This means adding a new skill to your triage-managed setup is as simple as creating `<name>/SKILL.md` in any of the seven directories and running `/triage on` — the router auto-discovers it on the next lookup via step 1. No configuration or registration needed.
+
 ## Token Savings (skills only)
 
 | | Without Triage | With Triage |
@@ -107,7 +168,7 @@ No LLM reasoning overhead. No extra API calls. Just fast deterministic matching.
 
 Run `/triage compare` for live numbers based on your skill inventory.
 
-## IMPORTANT: Cross-Tool Impact
+## Cross-Tool Impact
 
 Triage renames `SKILL.md` → `SKILL.md.disabled` on disk. Other AI tools that scan the same directories (Claude Code, Cursor, Windsurf) will also see skills as hidden. Run `/triage off` to restore.
 
@@ -129,9 +190,9 @@ npm uninstall -g opencode-triage
 
 Delete the command file if present:
 
-```bash
-rm ~/.config/opencode/commands/triage.md   # macOS/Linux
-del %USERPROFILE%\.config\opencode\commands\triage.md   # Windows
+```shell
+rm ~/.config/opencode/commands/triage.md           # macOS / Linux
+del %USERPROFILE%\.config\opencode\commands\triage.md  # Windows (cmd)
 ```
 
 Restart OpenCode. Clean.
