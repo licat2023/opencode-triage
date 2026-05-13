@@ -144,21 +144,21 @@ After (/triage on):
 
 The `/triage status` command detects the current state by scanning all seven directories for both `.md` and `.md.disabled` extensions, comparing counts to determine which skills are hidden vs exposed.
 
-### The Triage Skill Itself
+### How Routing Works
 
-The triage router is itself a skill living at `~/.agents/skills/triage/SKILL.md.disabled`. It's the only skill the system prompt lists in `<available_skills>`. Its instructions define a deterministic 5-step protocol:
+The triage router is a registered plugin tool. When called, it runs a deterministic 5-step routing process:
 
-1. **Discover** — Runs a PowerShell script that globs `*SKILL.md*` under all seven directories, extracts the `description:` YAML frontmatter from each file, and prints a table of names + descriptions.
+1. **Discover** — Scans directories for skill files, extracts name and description from frontmatter, caches results.
 
-2. **Match** — Compares the user's natural language request against each skill's name and description using keyword scoring (same algorithm described above). Picks the most specific match, or returns a shortlist if confidence is low (gap < 30).
+2. **Match** — Scores query keywords against each skill — exact word match = 15pts, partial = 10pts. Found in name → ×3, found in description → ×1. Name matches dominate.
 
-3. **Load** — Uses the `read` tool to load the matched skill's full instructions from its `SKILL.md.disabled` file.
+3. **Route** — Auto-selects the clear winner (gap ≥ 30) or returns a top-5 shortlist for manual pick.
 
-4. **Follow** — Executes the loaded instructions step by step.
+4. **Load** — Reads the matched file, strips frontmatter, returns the instructions.
 
-5. **No Match** — Informs the user that no skill matched and offers to create a new one.
+5. **Notify** — Shows a TUI toast confirming the routing result.
 
-This means adding a new skill to your triage-managed setup is as simple as creating `<name>/SKILL.md` in any of the seven directories and running `/triage on` — the router auto-discovers it on the next lookup via step 1. No configuration or registration needed.
+This means adding a new skill to your triage-managed setup is as simple as creating `<name>/SKILL.md` in any of the seven directories and running `/triage on` — the router auto-discovers it after the next OpenCode restart via step 1. No configuration or registration needed.
 
 ## Token Savings (skills only)
 
@@ -197,6 +197,9 @@ Delete the command file if present:
 
 ```shell
 rm ~/.config/opencode/commands/triage.md           # macOS / Linux
+```
+
+```cmd
 del %USERPROFILE%\.config\opencode\commands\triage.md  # Windows (cmd)
 ```
 
