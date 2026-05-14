@@ -1,6 +1,6 @@
 {
   "name": "opencode-triage",
-  "version": "1.2.8",
+  "version": "1.2.9",
   "description": "Deterministic skill router for OpenCode — saves ~90% tokens by hiding skills from the system prompt and routing via keyword matching",
   "license": "MIT",
   "author": "Carlos Spagnoletti",

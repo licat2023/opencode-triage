@@ -35,7 +35,13 @@ import {
 import type { SkillEntry, ScoredSkill } from "./utils.js"
 
 // Exclude the triage skill itself — self-referencing would create infinite loops
-const EXCLUDED_SKILLS = new Set(["triage"])
+// Can be overridden via OPENCODE_TRIAGE_EXCLUDED env var (comma-separated)
+// Fixes edge case #13: previously hardcoded, no way to allow a skill named "triage"
+const getExcludedSkills = (): Set<string> => {
+  const env = process.env.OPENCODE_TRIAGE_EXCLUDED
+  if (env) return new Set(env.split(",").map(s => s.trim()).filter(Boolean))
+  return new Set(["triage"])
+}
 
 /**
  * Builds the list of directories to scan for skill files.
@@ -66,15 +72,19 @@ function buildSkillLocations(worktree: string) {
  * results and explicit notification calls.
  */
 export const server: Plugin = async ({ worktree, client }) => {
-  // Cache: discovered skills per worktree
-  let cache: SkillEntry[] | null = null
+  // Cache: discovered skills per worktree, with timestamp for invalidation
+  // Fixes edge case #4: previously cache was never invalidated after CLI toggle,
+  // causing "skill content unavailable" errors until OpenCode restart
+  let cache: { skills: SkillEntry[]; timestamp: number } | null = null
+  const CACHE_TTL_MS = 5_000 // Re-discover every 5s to catch CLI toggles
 
   async function getCachedSkills(): Promise<SkillEntry[]> {
-    if (cache === null) {
+    const now = Date.now()
+    if (cache === null || now - cache.timestamp > CACHE_TTL_MS) {
       const locations = buildSkillLocations(worktree)
-      cache = await discoverAllSkills(locations)
+      cache = { skills: await discoverAllSkills(locations), timestamp: now }
     }
-    return cache
+    return cache.skills
   }
 
   return {
@@ -127,7 +137,22 @@ export const server: Plugin = async ({ worktree, client }) => {
             .sort((a, b) => b.score - a.score)
 
           if (scored.length === 0) {
-            return `No skill matches "${query}". Try different keywords.`
+            const findSkills = skills.find(s => s.name.toLowerCase() === "find-skills")
+            if (findSkills) {
+              const content = await readSkillContent(findSkills.path)
+              return [
+                `SKILL ROUTED: ${findSkills.name}`,
+                `Matched by: remote search fallback`,
+                ``,
+                content,
+              ].join("\n")
+            }
+            const [skillsSh, superpowers] = await Promise.all([
+              searchRemoteSkills(query),
+              searchSuperpowers(),
+            ])
+            const combined = [skillsSh, superpowers].filter(Boolean).join("")
+            return `No skill matches "${query}". Try different keywords.${combined}`
           }
 
           // Confidence gap: top match vs runner-up. Large gap = clear winner
@@ -234,6 +259,7 @@ async function discoverAllSkills(
 ): Promise<SkillEntry[]> {
   const skills: SkillEntry[] = []
   const seen = new Set<string>()
+  const excluded = getExcludedSkills()
 
   for (const { base, scope } of locations) {
     try {
@@ -242,7 +268,7 @@ async function discoverAllSkills(
       for (const entry of entries) {
         if (!entry.isDirectory()) continue
         if (entry.isSymbolicLink()) continue
-        if (EXCLUDED_SKILLS.has(entry.name)) continue
+        if (excluded.has(entry.name)) continue
         if (!isValidSkillName(entry.name)) continue
 
         const result = await tryReadSkill(join(resolvedBase, entry.name))
@@ -314,5 +340,45 @@ async function readSkillContent(filePath: string): Promise<string> {
     return bodyMatch ? bodyMatch[1].trim() : clean.trim()
   } catch {
     return "(skill content unavailable)"
+  }
+}
+
+async function searchRemoteSkills(query: string): Promise<string> {
+  const url = `https://skills.sh/api/v1/skills/search?q=${encodeURIComponent(query)}&limit=5`
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 3000)
+    const res = await fetch(url, { signal: controller.signal })
+    clearTimeout(timer)
+    if (!res.ok) return ""
+    const body = await res.json() as { data?: Array<{ name: string; source: string; installs: number; installUrl: string | null; url: string }> }
+    if (!body.data || body.data.length === 0) return ""
+    const lines = body.data.map(s => {
+      const install = s.installUrl ? `npx skills add ${s.source}` : s.url
+      return `  - ${s.name} (\`${install}\`) ${s.installs.toLocaleString()} installs`
+    })
+    return "\n\nSuggestions from skills.sh:\n" + lines.join("\n")
+  } catch {
+    return ""
+  }
+}
+
+async function searchSuperpowers(): Promise<string> {
+  const url = "https://api.github.com/repos/obra/superpowers/contents"
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 3000)
+    const res = await fetch(url, { signal: controller.signal })
+    clearTimeout(timer)
+    if (!res.ok) return ""
+    const body = await res.json() as Array<{ name: string; type: string; html_url: string }>
+    const dirs = body.filter(e => e.type === "dir")
+    if (dirs.length === 0) return ""
+    const lines = dirs.slice(0, 10).map(d =>
+      `  - ${d.name} (${d.html_url})`
+    )
+    return "\n\nSuperpowers from obra/superpowers:\n" + lines.join("\n")
+  } catch {
+    return ""
   }
 }

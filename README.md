@@ -68,6 +68,15 @@ Install opencode-triage (https://github.com/cascharly/opencode-triage) — a det
 | `/triage status` | See what's hidden and what's exposed |
 | `/triage compare` | Token savings estimate for your skills |
 
+### Flags
+
+| Flag | Where | What it does |
+|---|---|---|
+| `--json` | All commands | Machine-readable JSON output |
+| `--quiet` | on/off | Suppress non-error output |
+| `--dry-run` | on/off | Preview changes without renaming |
+| `--all` | status | Show full skill list without truncation |
+
 All commands can also be run directly in your terminal via `npx opencode-triage <command>` (e.g., `npx opencode-triage on --local`, `npx opencode-triage on --both`). No OpenCode session needed.
 
 Global affects `~/.config/opencode/skills/`, `~/.claude/skills/`, `~/.agents/skills/`.
@@ -142,13 +151,13 @@ After (/triage on):
 
 `/triage off` reverses the operation — it renames every `SKILL.md.disabled` back to `SKILL.md`, restoring native discovery.
 
-The `/triage status` command detects the current state by scanning all seven directories for both `.md` and `.md.disabled` extensions, comparing counts to determine which skills are hidden vs exposed.
+The `/triage status` command detects the current state by scanning all seven directories for both `.md` and `.md.disabled` extensions, showing skills grouped by scope with `[hidden]`/`[exposed]` colored badges. It also warns when the plugin is ACTIVE but some skills remain exposed (out-of-sync state).
 
 ### How Routing Works
 
 The triage router is a registered plugin tool. When called, it runs a deterministic 5-step routing process:
 
-1. **Discover** — Scans directories for skill files, extracts name and description from frontmatter, caches results.
+1. **Discover** — Scans directories for skill files, extracts name and description from frontmatter. Results are cached with a 5s TTL so CLI toggles are picked up without restart.
 
 2. **Match** — Scores query keywords against each skill — exact word match = 15pts, partial = 10pts. Found in name → ×3, found in description → ×1. Name matches dominate.
 
@@ -162,14 +171,32 @@ This means adding a new skill to your triage-managed setup is as simple as creat
 
 ## Token Savings (skills only)
 
-Example with `context7-mcp` skill (~642 tokens):
+Real data from this project (20 skills, full content):
 
-| | Without Triage | With Triage |
-|---|---|---|
-| **Prompt per call** | 642 tokens | 59 tokens |
-| Tool definition | 0 tokens | 59 tokens |
-| Skill content | 642 tokens | 0 tokens |
-| **Saved per call** | — | **583 tokens (91%)** |
+```
+Cost Comparison
+
+Skills: 20 hidden · 0 exposed · 20 total
+
+                        WITH triage           WITHOUT
+──────────────────      ────────────────────  ────────────────────
+Prompt per call         3279 tokens           36398 tokens
+  Tool definition       59 tokens             0 tokens
+  Skill read            3220 tokens           36398 tokens
+──────────────────      ────────────────────  ────────────────────
+Saved per call          33119 tokens (91%)
+
+Time: 0.2ms (triage) vs 7.3ms (all skills)
+
+Top skills by full content size:
+  code-security                  ~3220 tokens
+  ai-agent-builder               ~3220 tokens
+  security-monitoring            ~2971 tokens
+  webhook-automation             ~2839 tokens
+  database-sync                  ~2759 tokens
+
+At ~50 calls/day: ~49.7M tokens saved/month
+```
 
 Run `/triage compare` for live numbers based on your skill inventory.
 

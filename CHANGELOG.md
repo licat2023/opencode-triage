@@ -5,6 +5,41 @@ All notable changes to opencode-triage are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.9] — 2026-05-13
+
+### Added
+- `--json` flag on all commands for machine-readable output
+- `--quiet` flag on toggle commands to suppress non-error output
+- `--dry-run` flag on on/off commands to preview changes without renaming
+- `--all` flag on status to show full skill list without truncation
+- Levenshtein-based command suggestions on typo (e.g. `stats` → `status`)
+- Out-of-sync warning when plugin is ACTIVE but skills remain exposed
+- `status` grouped by scope with compact header bar and `[hidden]`/`[exposed]` colored badges
+- `compare` shows top 5 hidden skills by token size and monthly savings estimate
+- Toggle diff view showing each renamed skill inline
+- Plugin skill cache TTL (5s) — auto-refreshes after CLI toggles without restart
+- `OPENCODE_TRIAGE_EXCLUDED` env var to override the hardcoded `triage` skill exclusion
+- 15 new tests for `stripJsoncComments`, Levenshtein distance, and command suggestion
+
+### Changed
+- `status` layout: compact one-line scope rows with `│` separators
+- `status` uses `[hidden]`/`[exposed]` terminology consistently (was `active`)
+- `toggle` only shows "Restart opencode" when files actually changed
+- `safeRenameSync` deletes target before rename to handle crash recovery / git merge conflicts
+- `postinstall` now always writes the command file (catches template updates on upgrade)
+- Config writes are now no-op when nothing changed (avoids unnecessary disk I/O and watcher triggers)
+- `findProjectRoot` checks 4 config variants (`.json` / `.jsonc`, nested / root-level)
+- `sanitizeName` now strips all C0/C1 control characters, not just ANSI escape codes
+
+### Fixed
+- JSONC comment stripper corrupts URLs with `//` — replaced naive regex with state-machine parser
+- `updateLocalConfig` crashes on JSONC configs, wiping all settings on parse failure
+- `showStatus` reports false ACTIVE when plugin name appears in a JSONC comment
+- `showCompare` overestimates savings by counting hidden skills in the "without" baseline
+- `showCompare` shows 0 tokens for "without" when all skills are hidden
+- Toggle output prints "removed" even when plugin wasn't in config
+- `safeRenameSync` crashes on Windows when both `SKILL.md` and `SKILL.md.disabled` exist (EEXIST)
+
 ## [1.2.8] — 2026-05-13
 
 ### Changed
