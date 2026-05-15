@@ -5,6 +5,17 @@ All notable changes to opencode-triage are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] — 2026-05-15
+
+### Changed
+- `compare` token model corrected: now measures `name+description` XML (what OpenCode injects per-message in the native `skill` tool) vs the triage tool definition — not full skill bodies, which are loaded on-demand in both modes and cost the same either way.
+- `compare` table relabelled: columns renamed to `WITH triage` / `WITHOUT (native)`, rows clarified as "Tool definition" and "Skill list XML". Dim footer note explains on-demand parity.
+- `compare` JSON output updated: `without_triage` now includes `tool_base` and `skill_list_xml` breakdown; `with_triage` adds `skill_list_xml: 0`; `time` field removed; `top_skills` now reports `name_desc_tokens` and `body_tokens` separately.
+- `compare` top-skills list now sorted by name+desc size (actual per-prompt cost) rather than full body size.
+
+### Fixed
+- `showCompare` deduplication: added `seen` Set keyed on `scope:name` to prevent a skill discovered in multiple directories from being counted and displayed more than once.
+
 ## [1.3.0] — 2026-05-15
 
 ### Changed

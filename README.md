@@ -1,21 +1,29 @@
 # opencode-triage
 
-> opencode-triage strips skill definitions from the main prompt and routes them on demand. Instead of loading every skill into every message, it uses keyword matching to activate only what you need. Cuts prompt token costs by up to 90% — no LLM overhead, no extra API calls, zero setup.
+> OpenCode already lazy-loads skill bodies — but it still injects every skill's name and description (from `SKILL.md` frontmatter) into the prompt on every message. With a growing skill library and verbose descriptions, that can mean hundreds of tokens burned before you type a word. opencode-triage eliminates that XML list entirely, replacing it with a single 59-token tool definition and routing on-demand via keyword matching.
 
 ## What It Does
 
-**This plugin saves tokens on skills only.** The rest of your system prompt (instructions, tools, etc.) is untouched.
+**This plugin saves tokens on skills only.** The rest of your system prompt (instructions, MCP tools, etc.) is untouched.
 
-Normally all your skills sit in the system prompt and burn tokens on every message — even when irrelevant. Triage hides just the skills and loads the right one **only when the LLM needs it**.
+OpenCode already lazy-loads full skill bodies — they're only fetched when the LLM explicitly calls the `skill()` tool. What it always injects, on every message, is a listing of every skill's name and description (from `SKILL.md` frontmatter) inside the `skill` tool definition:
+
+```xml
+<available_skills>
+  <skill><name>llm-security</name><description>Security guidelines for LLM applications...</description></skill>
+  <skill><name>semgrep</name><description>Run Semgrep static analysis scans...</description></skill>
+  ... (grows with every skill you add)
+</available_skills>
+```
+
+With triage ON, all `SKILL.md` files are renamed to `.disabled` — OpenCode's skill tool disappears entirely. Only the triage tool remains (59 tokens). The right skill body is still fetched on demand when needed, same as before.
 
 ```
-No triage:   [skill A] [skill B] [skill C] ...  ← always burning tokens
-With triage: triage({ query }) → finds the right skill → returns it only when needed
+No triage:   [name+desc of A] [name+desc of B] [name+desc of C] ...  ← every message
+With triage: triage({ query }) → keyword match → loads one skill body when needed
 ```
 
-Skills are renamed from `SKILL.md` → `SKILL.md.disabled` to hide them from OpenCode's discovery. Run `/triage off` to restore.
-
-Since only the matched skill is loaded at lookup time, you can install virtually unlimited skills without burning any tokens on idle ones.
+Since only the matched skill is loaded at lookup time, you can install virtually unlimited skills without burning any tokens on their idle name+description listings. And because the native `<available_skills>` XML grows with every skill you add, **the more skills you install, the more triage saves** — each new skill adds its name+description to the native prompt on every message, but adds zero tokens when triage is on.
 
 ## Quick Start
 
@@ -29,11 +37,7 @@ Restart OpenCode, then type `/triage on`. That's it.
 
 ### Global (recommended)
 
-```bash
-npm install -g opencode-triage
-```
-
-Restart OpenCode. `/triage` is available in **every** project. Type `/triage on` to enable.
+Same as Quick Start above. `/triage` is available in **every** project.
 
 ### Per-project
 
@@ -137,8 +141,8 @@ When you run `/triage on`, the CLI renames every `SKILL.md` to `SKILL.md.disable
 
 ```
 Before (/triage on):
-  .agent/skills/backup-restore/SKILL.md          ← loaded into prompt
-  ~/.agents/skills/database-sync/SKILL.md        ← loaded into prompt
+  .agent/skills/backup-restore/SKILL.md          ← name+desc listed in prompt
+  ~/.agents/skills/database-sync/SKILL.md        ← name+desc listed in prompt
 
 After (/triage on):
   .agent/skills/backup-restore/SKILL.md.disabled  ← hidden
@@ -163,34 +167,38 @@ The triage router is a registered plugin tool. When called, it runs a determinis
 
 5. **Notify** — Shows a TUI toast confirming the routing result.
 
-This means adding a new skill to your triage-managed setup is as simple as creating `<name>/SKILL.md` in any of the seven directories and running `/triage on` — the router auto-discovers it after the next OpenCode restart via step 1. No configuration or registration needed.
-
 ## Token Savings (skills only)
 
-Real data from this project (20 skills, full content):
+Real data from this project (19 skills). The comparison is between what lives in the
+prompt on **every message** — full skill bodies are fetched on-demand in both modes
+and cost the same either way.
 
 ```
 Cost Comparison Global + Local
 
-Skills: 20 hidden · 0 exposed · 20 total
+Skills: 19 hidden · 0 exposed · 19 total
 
-                        WITH triage           WITHOUT
+                        WITH triage           WITHOUT (native)
 ──────────────────      ────────────────────  ────────────────────
-Prompt per call         3279 tokens           36398 tokens
-  Tool definition       59 tokens             0 tokens
-  Skill read            3220 tokens           36398 tokens
+Prompt per call         59 tokens             1226 tokens
+  Tool definition       59 tokens             32 tokens
+  Skill list XML        0 tokens              1194 tokens
+  (skill body*)         same for both →       loaded on-demand
 ──────────────────      ────────────────────  ────────────────────
-Saved per call          33119 tokens (91%)
+Saved per call          1167 tokens (95%)
 
-Time: 0.2ms (triage) vs 7.3ms (all skills)
+* Skill body is fetched on-demand in both modes — equal cost, not counted above.
 
-Top skills by full content size:
-  code-security                  ~3220 tokens
-  ai-agent-builder               ~3220 tokens
-  security-monitoring            ~2971 tokens
-  webhook-automation             ~2839 tokens
-  database-sync                  ~2759 tokens
+Top skills by name+desc size (what actually costs per-prompt):
+  llm-security                   ~167 tokens  (full body: ~1299)
+  semgrep                        ~150 tokens  (full body: ~2419)
+  vercel-react-best-practices    ~104 tokens  (full body: ~1576)
+  context7-mcp                   ~84 tokens   (full body: ~641)
 ```
+
+> **Note:** description verbosity directly drives prompt cost. `llm-security`'s
+> 167-token description is the single biggest cost driver here — keep descriptions
+> specific but concise for maximum savings.
 
 Run `/triage compare` for live numbers based on your skill inventory.
 
@@ -198,7 +206,7 @@ Run `/triage compare` for live numbers based on your skill inventory.
 
 Triage renames `SKILL.md` → `SKILL.md.disabled` on disk. Other AI tools that scan the same directories (Claude Code, Cursor, Windsurf) will not see them either — the skills are hidden from all tools. Run `/triage off` to restore.
 
-Use `/triage on --local` to isolate triage to one project without affecting global skills. Use `/triage on --both` to enable triage in all scopes at once.
+Use `/triage on --local` to isolate triage to one project without affecting global skills.
 
 ## Uninstall
 

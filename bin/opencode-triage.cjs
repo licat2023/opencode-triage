@@ -254,6 +254,10 @@ function setPluginMode(plugin, mode) {
 
 function collectSkills() {
   const skills = []
+  // Dedup by scope+name: if the same directory name appears in multiple
+  // directories of the same scope (e.g. .agents/skills/ and .claude/skills/),
+  // keep only the first occurrence. SKILL_DIRS order determines priority.
+  const seen = new Set()
   for (const { base, label, scope } of SKILL_DIRS) {
     if (!fs.existsSync(base)) continue
     const dirs = fs.readdirSync(base, { withFileTypes: true })
@@ -262,9 +266,12 @@ function collectSkills() {
       if (d.isSymbolicLink()) continue
       if (d.name === "triage") continue
       if (d.name.includes(path.sep) || d.name === ".." || d.name === ".") continue
+      const key = `${scope}:${d.name}`
+      if (seen.has(key)) continue
       const hasDisabled = fs.existsSync(path.join(base, d.name, "SKILL.md.disabled"))
       const hasActive = fs.existsSync(path.join(base, d.name, "SKILL.md"))
       if (hasDisabled || hasActive) {
+        seen.add(key)
         skills.push({
           name: sanitizeName(d.name),
           label,
@@ -558,8 +565,12 @@ function setMode(mode, scope) {
 // ── status ────────────────────────────────────────────────
 
 function calcHiddenSkillTokens() {
-  let totalTokens = 0
-  for (const { base } of SKILL_DIRS) {
+  // Count only the name+description XML per skill — that is what the native
+  // `skill` tool injects into the prompt. Full bodies are loaded on-demand
+  // and cost the same whether triage is active or not.
+  const xmlEntries = []
+  const seen = new Set()
+  for (const { base, scope } of SKILL_DIRS) {
     if (!fs.existsSync(base)) continue
     const dirs = fs.readdirSync(base, { withFileTypes: true })
     for (const d of dirs) {
@@ -567,6 +578,8 @@ function calcHiddenSkillTokens() {
       if (d.isSymbolicLink()) continue
       if (d.name === "triage") continue
       if (d.name.includes(path.sep) || d.name === ".." || d.name === ".") continue
+      const key = `${scope}:${d.name}`
+      if (seen.has(key)) continue
       const dirPath = path.join(base, d.name)
       const file = fs.existsSync(path.join(dirPath, "SKILL.md.disabled"))
         ? path.join(dirPath, "SKILL.md.disabled")
@@ -576,12 +589,16 @@ function calcHiddenSkillTokens() {
       if (file) {
         try {
           const content = fs.readFileSync(file, "utf-8")
-          totalTokens += estimateTokens(content)
+          const nativeName = extractFrontmatterField(content, "name") || d.name
+          const nativeDesc = extractFrontmatterField(content, "description") || ""
+          seen.add(key)
+          xmlEntries.push({ nativeName, nativeDesc })
         } catch {}
       }
     }
   }
-  return totalTokens
+  const xml = buildNativeSkillXml(xmlEntries)
+  return estimateTokens(xml)
 }
 
 function showStatus() {
@@ -598,37 +615,16 @@ function showStatus() {
   const totalExposed = projExposed + gloExposed
   const hiddenTokens = calcHiddenSkillTokens()
 
-  // NET savings: hidden total minus triage overhead (tool def + one skill read)
+  // NET savings: native XML list (name+desc per skill) minus triage tool def.
+  // Skill body loading costs the same on both sides (on-demand), so it cancels out.
   const TOOL_DEF_TEXT =
     "Discover and route to the right specialized skill. " +
     "Call this before any non-trivial task. " +
     "Pass a brief description. Returns the best match or a list of candidates." +
     "Brief description of what you need help with, e.g. 'backup my database'"
   const toolDefTokens = estimateTokens(TOOL_DEF_TEXT)
-  let largestHiddenTokens = 0
-  for (const { base } of SKILL_DIRS) {
-    if (!fs.existsSync(base)) continue
-    const dirs = fs.readdirSync(base, { withFileTypes: true })
-    for (const d of dirs) {
-      if (!d.isDirectory()) continue
-      if (d.isSymbolicLink()) continue
-      if (d.name === "triage") continue
-      if (d.name.includes(path.sep) || d.name === ".." || d.name === ".") continue
-      const dirPath = path.join(base, d.name)
-      const file = fs.existsSync(path.join(dirPath, "SKILL.md.disabled"))
-        ? path.join(dirPath, "SKILL.md.disabled")
-        : fs.existsSync(path.join(dirPath, "SKILL.md"))
-          ? path.join(dirPath, "SKILL.md")
-          : null
-      if (file) {
-        try {
-          const content = fs.readFileSync(file, "utf-8")
-          largestHiddenTokens = Math.max(largestHiddenTokens, estimateTokens(content))
-        } catch {}
-      }
-    }
-  }
-  const netSavings = hiddenTokens - toolDefTokens - largestHiddenTokens
+  // hiddenTokens already holds native XML tokens (name+desc only) from calcHiddenSkillTokens()
+  const netSavings = hiddenTokens - toolDefTokens
 
   // ON/OFF derived from skill file state (hidden/exposed), not plugin config
   const projState = projSkills.length === 0 ? "none"
@@ -739,6 +735,36 @@ function estimateTokens(text) {
   return Math.ceil(text.length / 4)
 }
 
+// Extract a single frontmatter field from SKILL.md content.
+// Supports single-line (`key: value`) and folded block (`key: >\n  ...`) formats.
+function extractFrontmatterField(content, key) {
+  const clean = content.charCodeAt(0) === 0xFEFF ? content.slice(1) : content
+  const fmEnd = clean.indexOf("\n---", 4)
+  if (fmEnd === -1) return null
+  const fm = clean.slice(4, fmEnd)
+  // Folded block: key: >
+  const safeKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const multiRe = new RegExp(`^${safeKey}:\\s*>(.+?)(?=\\r?\\n\\S|$)`, "sm")
+  const multiMatch = fm.match(multiRe)
+  if (multiMatch) return multiMatch[1].replace(/\n\s*/g, " ").trim()
+  // Single line: key: value
+  const singleRe = new RegExp(`^${safeKey}:\\s*(.+)$`, "m")
+  const singleMatch = fm.match(singleRe)
+  return singleMatch ? singleMatch[1].trim() : null
+}
+
+// Build the <available_skills> XML block OpenCode injects into the native
+// `skill` tool description — each skill contributes name + description only.
+function buildNativeSkillXml(skills) {
+  if (skills.length === 0) return ""
+  const items = skills.map(s => {
+    const name = s.nativeName || s.name
+    const desc = s.nativeDesc || ""
+    return `<skill>\n<name>${name}</name>\n<description>${desc}</description>\n</skill>`
+  }).join("\n")
+  return `<available_skills>\n${items}\n</available_skills>`
+}
+
 function readSkillContent(dirPath) {
   const disabled = path.join(dirPath, "SKILL.md.disabled")
   const active = path.join(dirPath, "SKILL.md")
@@ -750,8 +776,9 @@ function readSkillContent(dirPath) {
 function showCompare() {
   const hiddenEntries = []
   const exposedEntries = []
+  const seen = new Set()
 
-  for (const { base } of SKILL_DIRS) {
+  for (const { base, scope } of SKILL_DIRS) {
     if (!fs.existsSync(base)) continue
     const dirs = fs.readdirSync(base, { withFileTypes: true })
     for (const d of dirs) {
@@ -759,13 +786,15 @@ function showCompare() {
       if (d.isSymbolicLink()) continue
       if (d.name === "triage") continue
       if (d.name.includes(path.sep) || d.name === ".." || d.name === ".") continue
+      const key = `${scope}:${d.name}`
+      if (seen.has(key)) continue
       const dirPath = path.join(base, d.name)
       const hasDisabled = fs.existsSync(path.join(dirPath, "SKILL.md.disabled"))
       const hasActive = fs.existsSync(path.join(dirPath, "SKILL.md"))
       const { content, filePath } = readSkillContent(dirPath)
       const entry = { name: d.name, content, filePath, tokens: estimateTokens(content) }
-      if (hasDisabled) hiddenEntries.push(entry)
-      else if (hasActive) exposedEntries.push(entry)
+      if (hasDisabled) { seen.add(key); hiddenEntries.push(entry) }
+      else if (hasActive) { seen.add(key); exposedEntries.push(entry) }
     }
   }
 
@@ -786,52 +815,45 @@ function showCompare() {
     "Brief description of what you need help with, e.g. 'backup my database'"
   const toolDefTokens = estimateTokens(TOOL_DEF_TEXT)
 
-  // Without triage: ALL skills loaded in full (body content, not just frontmatter)
-  const allSkillsFullTokens = hiddenEntries.concat(exposedEntries).reduce((sum, s) => {
-    return sum + estimateTokens(s.content)
-  }, 0)
-
-  // With triage: tool def + full body of ONE matched skill
-  const sampleSkill = hiddenEntries[0] || exposedEntries[0]
-  const sampleContent = sampleSkill.content
-  const singleSkillTokens = estimateTokens(sampleContent)
-
-  const t0 = process.hrtime.bigint()
-  fs.readFileSync(sampleSkill.filePath, "utf-8")
-  const t1 = process.hrtime.bigint()
-  const singleReadMs = Number(t1 - t0) / 1_000_000
-
-  const t2 = process.hrtime.bigint()
-  for (const { base } of SKILL_DIRS) {
-    if (!fs.existsSync(base)) continue
-    const dirs = fs.readdirSync(base, { withFileTypes: true })
-    for (const d of dirs) {
-      if (!d.isDirectory()) continue
-      if (d.isSymbolicLink()) continue
-      if (d.name === "triage") continue
-      readSkillContent(path.join(base, d.name)).content
-    }
+  // Enrich entries with frontmatter name + description
+  const allEntries = hiddenEntries.concat(exposedEntries)
+  for (const entry of allEntries) {
+    entry.nativeName = extractFrontmatterField(entry.content, "name") || entry.name
+    entry.nativeDesc = extractFrontmatterField(entry.content, "description") || ""
+    entry.nameDescTokens = estimateTokens(
+      `<skill>\n<name>${entry.nativeName}</name>\n<description>${entry.nativeDesc}</description>\n</skill>`
+    )
   }
-  const t3 = process.hrtime.bigint()
-  const allReadMs = Number(t3 - t2) / 1_000_000
 
-  const withoutCost = allSkillsFullTokens
-  const withCost = toolDefTokens + singleSkillTokens
+  // WITHOUT triage (OpenCode native): native `skill` tool base text + <available_skills> XML
+  // Only name + description appear in the prompt per skill — full bodies are loaded on-demand.
+  const SKILL_TOOL_BASE =
+    "Load a skill by name. Returns the full skill instructions.\n" +
+    "Call this when you need to apply a specific technique or workflow."
+  const skillToolBaseTokens = estimateTokens(SKILL_TOOL_BASE)
+  const nativeXml = buildNativeSkillXml(allEntries)
+  const nativeXmlTokens = estimateTokens(nativeXml)
+  const withoutCost = skillToolBaseTokens + nativeXmlTokens
+
+  // WITH triage: only the triage tool definition in the prompt — no XML list at all.
+  // Skill body loading is on-demand in both modes, so it costs the same and is not counted.
+  const withCost = toolDefTokens
+
   const saved = withoutCost - withCost
   const pct = withoutCost > 0 ? Math.round((saved / withoutCost) * 100) : 0
 
-  // Top skills by full content size
-  const allSkills = hiddenEntries.concat(exposedEntries).sort((a, b) => b.tokens - a.tokens)
-  const topSkills = allSkills.slice(0, 5)
+  // Top skills by name+desc size (what actually costs per-prompt)
+  const sortedEntries = [...allEntries].sort((a, b) => b.nameDescTokens - a.nameDescTokens)
+  const topSkills = sortedEntries.slice(0, 5)
 
   if (isJson) {
     const json = {
       skills: { hidden: hiddenEntries.length, exposed: exposedEntries.length, total },
-      with_triage: { total: withCost, tool_def: toolDefTokens, skill_read: singleSkillTokens },
-      without_triage: { total: withoutCost },
+      with_triage: { total: withCost, tool_def: toolDefTokens, skill_list_xml: 0 },
+      without_triage: { total: withoutCost, tool_base: skillToolBaseTokens, skill_list_xml: nativeXmlTokens },
       saved: { tokens: saved, percent: pct },
-      time: { triage_ms: +singleReadMs.toFixed(1), all_ms: +allReadMs.toFixed(1) },
-      top_skills: topSkills.map(s => ({ name: s.name, tokens: s.tokens })),
+      note: "Skill body loading costs the same on both sides (on-demand) and is not counted.",
+      top_skills: topSkills.map(s => ({ name: s.nativeName, name_desc_tokens: s.nameDescTokens, body_tokens: s.tokens })),
     }
     console.log(JSON.stringify(json, null, 2))
     return
@@ -844,21 +866,22 @@ function showCompare() {
   console.log()
   console.log(`Skills: ${hiddenEntries.length} hidden · ${exposedEntries.length} exposed · ${total} total`)
   console.log()
-  console.log(pad("", 24) + pad("WITH triage", 22) + pad("WITHOUT", 22))
+  console.log(pad("", 24) + pad("WITH triage", 22) + pad("WITHOUT (native)", 22))
   console.log(pad("──────────────────", 24) + pad("────────────────────", 22) + pad("────────────────────", 22))
   console.log(pad("Prompt per call", 24) + pad(withCost + " tokens", 22) + pad(withoutCost + " tokens", 22))
-  console.log(pad("  Tool definition", 24) + pad(toolDefTokens + " tokens", 22) + pad("0 tokens", 22))
-  console.log(pad("  Skill read", 24) + pad(singleSkillTokens + " tokens", 22) + pad(withoutCost + " tokens", 22))
+  console.log(pad("  Tool definition", 24) + pad(toolDefTokens + " tokens", 22) + pad(skillToolBaseTokens + " tokens", 22))
+  console.log(pad("  Skill list XML", 24) + pad("0 tokens", 22) + pad(nativeXmlTokens + " tokens", 22))
+  console.log(DIM + pad("  (skill body*)", 24) + pad("same for both →", 22) + pad("loaded on-demand", 22) + RESET)
   console.log(pad("──────────────────", 24) + pad("────────────────────", 22) + pad("────────────────────", 22))
   console.log(BOLD + pad("Saved per call", 24) + pad(saved + " tokens (" + pct + "%)", 22) + RESET)
   console.log()
-  console.log(`Time: ${singleReadMs.toFixed(1)}ms (triage) vs ${allReadMs.toFixed(1)}ms (all skills)`)
+  console.log(DIM + "  * Skill body is fetched on-demand in both modes — equal cost, not counted above." + RESET)
   console.log()
 
   if (topSkills.length > 0) {
-    console.log("Top skills by full content size:")
+    console.log("Top skills by name+desc size (prompt cost per skill):")
     topSkills.forEach(s => {
-      console.log(`  ${s.name.padEnd(30)} ~${s.tokens} tokens`)
+      console.log(`  ${s.nativeName.padEnd(32)} ~${s.nameDescTokens} tokens  (full body: ~${s.tokens})`)
     })
     console.log()
   }
