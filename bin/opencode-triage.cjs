@@ -4,16 +4,17 @@
  * ==================
  * Manage the opencode-triage skill router plugin.
  *
- * Usage: /triage on [--local | --global | --both] | off [--local | --global | --both] | status | compare | help
+ * Usage: /triage on | off | status | compare | version | help
  *
  * Quickstart:
- *   /triage on        Enable plugin + hide skills from system prompt (global)
- *   /triage on --both Enable in both scopes (global + local)
- *   /triage off       Disable plugin + restore native skill discovery (global)
- *   /triage off --both Disable in both scopes
- *   /triage status    Show current plugin state and skill counts
- *   /triage compare   Show token/time cost comparison table
- *   /triage help      Show full usage guide
+ *   /triage on    Hide all skills from the AI prompt (global + local)
+ *   /triage off   Expose all skills to the AI prompt (global + local)
+ *   /triage status  Show current state and skill counts
+ *
+ * Use /triage off before switching to Cursor or another AI tool.
+ * Use /triage on to return to routed mode.
+ *
+ * Advanced: --local or --global to target a single scope instead of both.
  */
 
 const fs = require("fs")
@@ -170,7 +171,7 @@ function levenshtein(a, b) {
 }
 
 function suggestCommand(input) {
-  const commands = ["on", "off", "enable", "disable", "status", "compare", "version", "help"]
+  const commands = ["on", "off", "enable", "disable", "mode", "status", "compare", "version", "help"]
   let best = null, bestDist = Infinity
   for (const cmd of commands) {
     const d = levenshtein(input, cmd)
@@ -186,7 +187,7 @@ function main() {
     : FLAGS.includes("--local") ? "local"
     : FLAGS.includes("--global") ? "global"
     : null
-  const toggleScope = scopeFlag || "global"
+  const toggleScope = scopeFlag || "both"
 
   switch (CMD) {
     case "on":
@@ -197,6 +198,9 @@ function main() {
       return toggle(false, toggleScope)
     case "status":
       return showStatus()
+    case "mode":
+      const modeArg = FLAGS.find(f => f === "auto" || f === "manual")
+      return setMode(modeArg || "auto", toggleScope)
     case "compare":
       return showCompare()
     case "version":
@@ -218,6 +222,31 @@ function main() {
       console.error(`Usage: /triage on | off | status | compare | version | help`)
       console.error(`Try /triage help for detailed usage.`)
       process.exit(1)
+  }
+}
+
+function isTriageEntry(entry) {
+  return entry === PLUGIN_NAME || (Array.isArray(entry) && entry[0] === PLUGIN_NAME)
+}
+
+function findTriageIndex(plugin) {
+  for (let i = 0; i < plugin.length; i++) {
+    if (isTriageEntry(plugin[i])) return i
+  }
+  return -1
+}
+
+function setPluginMode(plugin, mode) {
+  const idx = findTriageIndex(plugin)
+  if (mode === "auto") {
+    const entry = ["opencode-triage", { autoHide: true }]
+    if (idx >= 0) plugin[idx] = entry
+    else plugin.push(entry)
+  } else {
+    if (idx >= 0) {
+      plugin.splice(idx, 1)
+      plugin.push("opencode-triage")
+    } else plugin.push("opencode-triage")
   }
 }
 
@@ -250,19 +279,23 @@ function collectSkills() {
 }
 
 function collectConfigState() {
-  let localActive = false
-  try {
-    const raw = fs.readFileSync(LOCAL_CFG_PATH, "utf-8")
-    localActive = (JSON.parse(stripJsoncComments(raw)).plugin || []).includes(PLUGIN_NAME)
-  } catch {}
+  function readMode(path) {
+    try {
+      const raw = fs.readFileSync(path, "utf-8")
+      const plugin = JSON.parse(stripJsoncComments(raw)).plugin || []
+      const idx = findTriageIndex(plugin)
+      if (idx < 0) return { active: false, mode: "manual" }
+      return {
+        active: true,
+        mode: Array.isArray(plugin[idx]) && plugin[idx][1]?.autoHide === true ? "auto" : "manual",
+      }
+    } catch { return { active: false, mode: "manual" } }
+  }
 
-  let globalActive = false
-  try {
-    const raw = fs.readFileSync(GLOBAL_CFG_PATH, "utf-8")
-    globalActive = (JSON.parse(stripJsoncComments(raw)).plugin || []).includes(PLUGIN_NAME)
-  } catch {}
+  const local = readMode(LOCAL_CFG_PATH)
+  const global = readMode(GLOBAL_CFG_PATH)
 
-  return { localActive, globalActive }
+  return { localActive: local.active, globalActive: global.active, localMode: local.mode, globalMode: global.mode }
 }
 
 // ── toggle ────────────────────────────────────────────────
@@ -347,16 +380,11 @@ function toggle(enable, scope) {
     return
   }
 
-  // Config updates
+  // Persist ON/OFF state: write autoHide: true/false to config so next session respects the choice
   const scopes = scope === "both" ? ["global", "local"] : [scope]
   for (const s of scopes) {
-    const cmdFile = s === "global" ? GLOBAL_CMD_FILE : LOCAL_CMD_FILE
-    if (s === "global") updateGlobalConfig(enable)
-    else updateLocalConfig(enable)
-    if (enable) {
-      fs.mkdirSync(path.dirname(cmdFile), { recursive: true })
-      fs.writeFileSync(cmdFile, CMD_TEMPLATE, "utf-8")
-    }
+    const cfgPath = s === "global" ? GLOBAL_CFG_PATH : LOCAL_CFG_PATH
+    writeTriageState(cfgPath, enable)
   }
 
   const scopeLabel = scope === "both" ? " (both scopes)" : scope ? ` (${scope} scope)` : ""
@@ -378,12 +406,43 @@ function toggle(enable, scope) {
     console.log(`  No changes — all skills already ${enable ? "hidden" : "exposed"}.`)
   }
 
-  // Only show restart message when something actually changed
+  // Restart only needed when skill files changed (plugin reloads cache every 5s, but startup watcher needs restart)
   if (totalRenamed > 0) {
     console.log()
     console.log(YELLOW + "Restart opencode for changes to take effect." + RESET)
   }
   console.log()
+}
+
+// Write autoHide: true/false into the plugin entry in config.
+// Does NOT add or remove the plugin — only sets the autoHide flag.
+// Creates the config if enabling and it doesn't exist yet.
+function writeTriageState(configPath, enable) {
+  let config = {}
+  let exists = false
+  try {
+    const raw = fs.readFileSync(configPath, "utf-8")
+    config = JSON.parse(stripJsoncComments(raw))
+    exists = true
+  } catch {}
+
+  // If config doesn't exist and we're disabling, nothing to persist
+  if (!exists && !enable) return
+  if (!exists) config = { "$schema": "https://opencode.ai/config.json" }
+
+  config.plugin = config.plugin || []
+  const idx = findTriageIndex(config.plugin)
+
+  // If plugin not registered and we're disabling, nothing to persist
+  if (idx < 0 && !enable) return
+
+  const entry = [PLUGIN_NAME, { autoHide: enable }]
+  if (idx >= 0) config.plugin[idx] = entry
+  else config.plugin.push(entry)
+
+  fs.mkdirSync(path.dirname(configPath), { recursive: true })
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8")
+  if (!isQuiet) console.log(`Config:    autoHide=${enable} → ${configPath}`)
 }
 
 function updateLocalConfig(enable) {
@@ -392,16 +451,17 @@ function updateLocalConfig(enable) {
   try {
     const raw = fs.readFileSync(LOCAL_CFG_PATH, "utf-8")
     config = JSON.parse(stripJsoncComments(raw))
-    hadPlugin = (config.plugin || []).includes(PLUGIN_NAME)
+    hadPlugin = (config.plugin || []).some(isTriageEntry)
   } catch {
     config = { "$schema": "https://opencode.ai/config.json" }
   }
   config.plugin = config.plugin || []
-  if (enable && !config.plugin.includes(PLUGIN_NAME)) {
+  const idx = findTriageIndex(config.plugin)
+  if (enable && !hadPlugin) {
     config.plugin.push(PLUGIN_NAME)
     if (!isQuiet) console.log(`Config:    added to ${LOCAL_CFG_PATH}`)
   } else if (!enable && hadPlugin) {
-    config.plugin = config.plugin.filter(p => p !== PLUGIN_NAME)
+    config.plugin.splice(idx, 1)
     if (!isQuiet) console.log(`Config:    removed from ${LOCAL_CFG_PATH}`)
   }
   fs.mkdirSync(path.dirname(LOCAL_CFG_PATH), { recursive: true })
@@ -431,26 +491,101 @@ function updateGlobalConfig(enable) {
     }
   }
   config.plugin = config.plugin || []
-  const hadPlugin = config.plugin.includes(PLUGIN_NAME)
+  const hadPlugin = config.plugin.some(isTriageEntry)
+  const idx = findTriageIndex(config.plugin)
   if (enable) {
-    if (!config.plugin.includes(PLUGIN_NAME)) {
+    if (!hadPlugin) {
       config.plugin.push(PLUGIN_NAME)
       fs.writeFileSync(GLOBAL_CFG_PATH, JSON.stringify(config, null, 2) + "\n", "utf-8")
       if (!isQuiet) console.log(`Config:    added to ${GLOBAL_CFG_PATH}`)
     }
   } else {
     if (hadPlugin) {
-      config.plugin = config.plugin.filter(p => p !== PLUGIN_NAME)
+      config.plugin.splice(idx, 1)
       fs.writeFileSync(GLOBAL_CFG_PATH, JSON.stringify(config, null, 2) + "\n", "utf-8")
       if (!isQuiet) console.log(`Config:    removed from ${GLOBAL_CFG_PATH}`)
     }
   }
 }
 
+function updatePluginConfigMode(configPath, mode) {
+  let raw
+  try {
+    raw = fs.readFileSync(configPath, "utf-8")
+  } catch { return false }
+
+  const config = JSON.parse(stripJsoncComments(raw))
+  config.plugin = config.plugin || []
+  const idx = findTriageIndex(config.plugin)
+
+  if (mode === "auto") {
+    if (idx >= 0 && Array.isArray(config.plugin[idx]) && config.plugin[idx][1]?.autoHide === true) return false
+    setPluginMode(config.plugin, "auto")
+  } else {
+    if (idx >= 0 && config.plugin[idx] === PLUGIN_NAME) return false
+    setPluginMode(config.plugin, "manual")
+  }
+
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8")
+  return true
+}
+
+function setMode(mode, scope) {
+  const scopes = scope === "both" ? ["global", "local"] : [scope]
+  let changed = 0
+
+  for (const s of scopes) {
+    const cfgPath = s === "global" ? GLOBAL_CFG_PATH : LOCAL_CFG_PATH
+    if (updatePluginConfigMode(cfgPath, mode)) {
+      if (!isQuiet) console.log(`Config:    updated ${cfgPath}`)
+      changed++
+    }
+  }
+
+  const modeLabel = mode === "auto" ? "AUTO" : "MANUAL"
+  const scopeLabel = scope === "both" ? " (both scopes)" : ` (${scope} scope)`
+  console.log()
+  console.log(BOLD + "Triage mode: " + modeLabel + scopeLabel + RESET)
+  console.log()
+  if (changed > 0) {
+    console.log(YELLOW + "Restart opencode for changes to take effect." + RESET)
+  } else {
+    console.log("  Already in " + mode + " mode — no changes.")
+  }
+  console.log()
+}
+
 // ── status ────────────────────────────────────────────────
 
+function calcHiddenSkillTokens() {
+  let totalTokens = 0
+  for (const { base } of SKILL_DIRS) {
+    if (!fs.existsSync(base)) continue
+    const dirs = fs.readdirSync(base, { withFileTypes: true })
+    for (const d of dirs) {
+      if (!d.isDirectory()) continue
+      if (d.isSymbolicLink()) continue
+      if (d.name === "triage") continue
+      if (d.name.includes(path.sep) || d.name === ".." || d.name === ".") continue
+      const dirPath = path.join(base, d.name)
+      const file = fs.existsSync(path.join(dirPath, "SKILL.md.disabled"))
+        ? path.join(dirPath, "SKILL.md.disabled")
+        : fs.existsSync(path.join(dirPath, "SKILL.md"))
+          ? path.join(dirPath, "SKILL.md")
+          : null
+      if (file) {
+        try {
+          const content = fs.readFileSync(file, "utf-8")
+          totalTokens += estimateTokens(content)
+        } catch {}
+      }
+    }
+  }
+  return totalTokens
+}
+
 function showStatus() {
-  const { localActive, globalActive } = collectConfigState()
+  const { localActive, globalActive, localMode, globalMode } = collectConfigState()
   const skills = collectSkills()
 
   const projSkills = skills.filter(s => s.scope === "project")
@@ -461,30 +596,78 @@ function showStatus() {
   const gloExposed = gloSkills.filter(s => s.state === "exposed").length
   const totalHidden = projHidden + gloHidden
   const totalExposed = projExposed + gloExposed
+  const hiddenTokens = calcHiddenSkillTokens()
 
-  // Out-of-sync detection
+  // NET savings: hidden total minus triage overhead (tool def + one skill read)
+  const TOOL_DEF_TEXT =
+    "Discover and route to the right specialized skill. " +
+    "Call this before any non-trivial task. " +
+    "Pass a brief description. Returns the best match or a list of candidates." +
+    "Brief description of what you need help with, e.g. 'backup my database'"
+  const toolDefTokens = estimateTokens(TOOL_DEF_TEXT)
+  let largestHiddenTokens = 0
+  for (const { base } of SKILL_DIRS) {
+    if (!fs.existsSync(base)) continue
+    const dirs = fs.readdirSync(base, { withFileTypes: true })
+    for (const d of dirs) {
+      if (!d.isDirectory()) continue
+      if (d.isSymbolicLink()) continue
+      if (d.name === "triage") continue
+      if (d.name.includes(path.sep) || d.name === ".." || d.name === ".") continue
+      const dirPath = path.join(base, d.name)
+      const file = fs.existsSync(path.join(dirPath, "SKILL.md.disabled"))
+        ? path.join(dirPath, "SKILL.md.disabled")
+        : fs.existsSync(path.join(dirPath, "SKILL.md"))
+          ? path.join(dirPath, "SKILL.md")
+          : null
+      if (file) {
+        try {
+          const content = fs.readFileSync(file, "utf-8")
+          largestHiddenTokens = Math.max(largestHiddenTokens, estimateTokens(content))
+        } catch {}
+      }
+    }
+  }
+  const netSavings = hiddenTokens - toolDefTokens - largestHiddenTokens
+
+  // ON/OFF derived from skill file state (hidden/exposed), not plugin config
+  const projState = projSkills.length === 0 ? "none"
+    : projHidden > 0 && projExposed === 0 ? "on"
+    : projHidden === 0 ? "off"
+    : "mixed"
+  const gloState = gloSkills.length === 0 ? "none"
+    : gloHidden > 0 && gloExposed === 0 ? "on"
+    : gloHidden === 0 ? "off"
+    : "mixed"
+
+  function stateColor(state) { return state === "on" ? GREEN : YELLOW }
+  function stateText(state) {
+    return state === "on" ? "ON" : state === "off" ? "OFF" : state === "mixed" ? "MIXED" : "—"
+  }
+
+  // Mixed-state warning: some skills hidden, some exposed in same scope
   const outOfSync = []
-  if (localActive && projExposed > 0) outOfSync.push(`${projExposed} project skill(s) exposed while plugin is ACTIVE`)
-  if (globalActive && gloExposed > 0) outOfSync.push(`${gloExposed} global skill(s) exposed while plugin is ACTIVE`)
+  if (projState === "mixed") outOfSync.push(`${projExposed} project skill(s) exposed · ${projHidden} hidden — run /triage on or /triage off to sync`)
+  if (gloState === "mixed") outOfSync.push(`${gloExposed} global skill(s) exposed · ${gloHidden} hidden — run /triage on or /triage off to sync`)
 
   if (isJson) {
     const json = {
       project: {
-        plugin: localActive ? "active" : "inactive",
+        state: projState,
         hidden: projHidden,
         exposed: projExposed,
         total: projHidden + projExposed,
         command: fs.existsSync(LOCAL_CMD_FILE) ? "found" : "not found",
       },
       global: {
-        plugin: globalActive ? "active" : "inactive",
+        state: gloState,
         hidden: gloHidden,
         exposed: gloExposed,
         total: gloHidden + gloExposed,
         command: fs.existsSync(GLOBAL_CMD_FILE) ? "found" : "not found",
       },
       totals: { hidden: totalHidden, exposed: totalExposed, total: totalHidden + totalExposed },
-      tokens_saved: totalHidden * 50,
+      tokens_saved: netSavings > 0 ? netSavings : 0,
       out_of_sync: outOfSync.length > 0 ? outOfSync : null,
       skills: skills.map(s => ({ name: s.name, state: s.state, scope: s.scope, dir: s.label })),
     }
@@ -493,17 +676,19 @@ function showStatus() {
   }
 
   const scopeSummary = []
-  if (localActive) scopeSummary.push(GREEN + "●" + RESET + " local")
-  if (globalActive) scopeSummary.push(GREEN + "●" + RESET + " global")
-  if (!localActive && !globalActive) scopeSummary.push(DIM + "○ inactive" + RESET)
+  if (projSkills.length > 0) scopeSummary.push("local "  + stateColor(projState) + stateText(projState) + RESET)
+  if (gloSkills.length  > 0) scopeSummary.push("global " + stateColor(gloState)  + stateText(gloState)  + RESET)
+  if (scopeSummary.length === 0) scopeSummary.push(DIM + "no skills found" + RESET)
 
   console.log()
   console.log(BOLD + "● Triage Status" + RESET + DIM + " — " + scopeSummary.join(" · ") + RESET)
   console.log()
 
   // Project row
-  console.log(`  Project:  ${localActive ? GREEN + "ACTIVE" + RESET : "inactive"}  │  ${projHidden} hidden · ${projExposed} exposed · ${projHidden + projExposed} total  │  ${fs.existsSync(LOCAL_CMD_FILE) ? GREEN + "command ✓" + RESET : DIM + "command ✗" + RESET}`)
-  console.log(`  Global:   ${globalActive ? GREEN + "ACTIVE" + RESET : "inactive"}  │  ${gloHidden} hidden · ${gloExposed} exposed · ${gloHidden + gloExposed} total  │  ${fs.existsSync(GLOBAL_CMD_FILE) ? GREEN + "command ✓" + RESET : DIM + "command ✗" + RESET}`)
+  const projLabel = projSkills.length > 0 ? stateColor(projState) + stateText(projState) + RESET : DIM + "—" + RESET
+  console.log(`  Project:  ${projLabel}  │  ${projHidden} hidden · ${projExposed} exposed · ${projHidden + projExposed} total  │  ${fs.existsSync(LOCAL_CMD_FILE) ? GREEN + "command ✓" + RESET : DIM + "command ✗" + RESET}`)
+  const gloLabel  = gloSkills.length  > 0 ? stateColor(gloState)  + stateText(gloState)  + RESET : DIM + "—" + RESET
+  console.log(`  Global:   ${gloLabel}  │  ${gloHidden} hidden · ${gloExposed} exposed · ${gloHidden + gloExposed} total  │  ${fs.existsSync(GLOBAL_CMD_FILE) ? GREEN + "command ✓" + RESET : DIM + "command ✗" + RESET}`)
   console.log()
 
   // Out-of-sync warning
@@ -535,7 +720,8 @@ function showStatus() {
     console.log()
   }
 
-  console.log(`  ${DIM}~${totalHidden * 50} tokens saved from prompt${RESET}`)
+  const savedLabel = netSavings > 0 ? netSavings.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : "0"
+  console.log(`  ${DIM}~${savedLabel} tokens saved from prompt${RESET}`)
 
   if (skills.length === 0) {
     console.log()
@@ -654,7 +840,7 @@ function showCompare() {
   const pad = (s, w) => String(s).padEnd(w)
 
   console.log()
-  console.log(BOLD + "Cost Comparison" + RESET)
+  console.log(BOLD + "Cost Comparison Global + Local" + RESET)
   console.log()
   console.log(`Skills: ${hiddenEntries.length} hidden · ${exposedEntries.length} exposed · ${total} total`)
   console.log()
@@ -677,8 +863,6 @@ function showCompare() {
     console.log()
   }
 
-  // Estimated monthly savings
-  console.log(DIM + `At ~50 calls/day: ~${(saved * 50 * 30 / 1000000).toFixed(1)}M tokens saved/month` + RESET)
   console.log()
 }
 
@@ -732,37 +916,33 @@ function showHelp() {
     console.log(JSON.stringify({
       version: CURRENT_VERSION,
       commands: ["on", "off", "status", "compare", "version", "help"],
-      flags: ["--local", "--global", "--both", "--json", "--quiet", "--dry-run"],
+      flags: ["--local", "--global", "--both", "--json", "--quiet", "--dry-run", "--all"],
     }, null, 2))
     return
   }
   console.log()
-  console.log(BOLD + "opencode-triage v" + CURRENT_VERSION + RESET + " -- Deterministic Skill Router")
+  console.log(BOLD + "opencode-triage v" + CURRENT_VERSION + RESET + " — Deterministic Skill Router")
   console.log()
-  console.log("  on              Hide global skills from prompt, enable triage (restart after)")
-  console.log("  on --local      Enable only in current project")
-  console.log("  on --both       Enable in both scopes (global + local)")
-  console.log("  off             Expose global skills, disable triage (restart after)")
-  console.log("  off --local     Disable only in current project")
-  console.log("  off --both      Disable in both scopes")
-  console.log("  status          Show hidden/exposed skills + token estimate")
-  console.log("  compare         Token/time cost comparison")
-  console.log("  version         Show version and check for updates")
-  console.log("  help            Show this help")
+  console.log("  " + BOLD + "on" + RESET + "       Hide all skills from the AI prompt   (restart after)")
+  console.log("  " + BOLD + "off" + RESET + "      Expose all skills to the AI prompt    (restart after)")
+  console.log("  " + BOLD + "status" + RESET + "   Show current state and skill counts")
+  console.log("  " + BOLD + "compare" + RESET + "  Token/time cost comparison")
+  console.log("  " + BOLD + "version" + RESET + "  Show version and check for updates")
+  console.log("  " + BOLD + "help" + RESET + "     Show this help")
   console.log()
-  console.log(BOLD + "FLAGS" + RESET)
+  console.log(DIM + "  Use /triage off before switching to Cursor or another AI tool." + RESET)
+  console.log(DIM + "  Use /triage on  to return to routed mode." + RESET)
   console.log()
-  console.log("  --json          Output as JSON (all commands)")
-  console.log("  --quiet         Suppress non-error output (toggle only)")
-  console.log("  --dry-run       Preview changes without renaming (on/off only)")
-  console.log("  --all           Show full skill list without truncation (status only)")
+  console.log(BOLD + "Advanced" + RESET + DIM + "  (override default: both scopes)" + RESET)
   console.log()
-  console.log(BOLD + "MORE" + RESET)
+  console.log("  --local       Target current project only")
+  console.log("  --global      Target global skills only")
+  console.log("  --dry-run     Preview changes without applying (on/off)")
+  console.log("  --json        Output as JSON (all commands)")
+  console.log("  --quiet       Suppress non-error output (on/off)")
+  console.log("  --all         Show full skill list without truncation (status)")
   console.log()
-  console.log("  " + BOLD + "Scopes:" + RESET + "     on/off default to global. Use --local or --both.")
-  console.log("  " + BOLD + "Examples:" + RESET + "  /triage on --both        Enable triage everywhere")
-  console.log("  " + BOLD + "  " + RESET + "            /triage off --both       Disable everywhere")
-  console.log("  " + BOLD + "Uninstall:" + RESET + "  npm uninstall -g opencode-triage  (or --save-dev)")
+  console.log("  " + BOLD + "Uninstall:" + RESET + "  npm uninstall -g opencode-triage")
   console.log("  " + BOLD + "Docs:" + RESET + "      https://github.com/cascharly/opencode-triage")
   console.log()
 }

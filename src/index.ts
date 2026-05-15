@@ -17,7 +17,8 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import { homedir } from "node:os"
 import { join, basename } from "node:path"
-import { readdir, readFile, realpath } from "node:fs/promises"
+import { readFileSync, watch } from "node:fs"
+import { readdir, readFile, realpath, rename } from "node:fs/promises"
 import notify from "./notify.js"
 import {
   THRESHOLD,
@@ -64,6 +65,71 @@ function buildSkillLocations(worktree: string) {
   ]
 }
 
+function stripJsoncComments(text: string): string {
+  let result = ""
+  let inString = false
+  let escape = false
+  let i = 0
+  while (i < text.length) {
+    const ch = text[i]
+    if (escape) { result += ch; escape = false; i++; continue }
+    if (ch === "\\" && inString) { result += ch; escape = true; i++; continue }
+    if (ch === '"') { inString = !inString; result += ch; i++; continue }
+    if (!inString && ch === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++
+      continue
+    }
+    if (!inString && ch === "/" && text[i + 1] === "*") {
+      i += 2
+      while (i < text.length - 1 && !(text[i] === "*" && text[i + 1] === "/")) i++
+      i += 2
+      continue
+    }
+    result += ch; i++
+  }
+  return result
+}
+
+/** Returns the configured triage state from a single config file. */
+function getTriageState(path: string): "on" | "off" | "unknown" {
+  try {
+    const raw = readFileSync(path, "utf-8")
+    const json = JSON.parse(stripJsoncComments(raw))
+    const plugin: unknown[] = json.plugin ?? []
+    for (const p of plugin) {
+      if (!Array.isArray(p) || p[0] !== "opencode-triage") continue
+      const opts = p[1] as Record<string, unknown> | undefined
+      if (opts?.autoHide === true)  return "on"
+      if (opts?.autoHide === false) return "off"
+    }
+    return "unknown"
+  } catch { return "unknown" }
+}
+
+/**
+ * Resolves the effective triage state from plugin options + config files.
+ * Priority: plugin options → local config → global config.
+ * Returns "on" | "off" | "unknown" (never configured).
+ */
+async function checkTriageState(
+  worktree: string,
+  options: Record<string, unknown> | undefined
+): Promise<"on" | "off" | "unknown"> {
+  if (options?.autoHide === true)  return "on"
+  if (options?.autoHide === false) return "off"
+  const paths = [
+    join(worktree, ".opencode", "opencode.json"),
+    join(worktree, ".opencode", "opencode.jsonc"),
+    join(homedir(), ".config", "opencode", "opencode.json"),
+    join(homedir(), ".config", "opencode", "opencode.jsonc"),
+  ]
+  for (const p of paths) {
+    const state = getTriageState(p)
+    if (state !== "unknown") return state
+  }
+  return "unknown"
+}
+
 /**
  * Triage skill router plugin — main entry point.
  *
@@ -71,7 +137,7 @@ function buildSkillLocations(worktree: string) {
  * `tool.execute.after` hook that renders TUI toasts for routing
  * results and explicit notification calls.
  */
-export const server: Plugin = async ({ worktree, client }) => {
+export const server: Plugin = async ({ worktree, client }, options) => {
   // Cache: discovered skills per worktree, with timestamp for invalidation
   // Fixes edge case #4: previously cache was never invalidated after CLI toggle,
   // causing "skill content unavailable" errors until OpenCode restart
@@ -86,6 +152,89 @@ export const server: Plugin = async ({ worktree, client }) => {
     }
     return cache.skills
   }
+
+  // Startup: apply persisted ON/OFF state
+  ;(async () => {
+    const triageState = await checkTriageState(worktree, options)
+
+    // Explicitly OFF — user ran /triage off. Do nothing this session.
+    if (triageState === "off") return
+
+    const autoHide = triageState === "on"
+    const locations = buildSkillLocations(worktree)
+    const excluded = getExcludedSkills()
+    let projectExposed = 0
+    let globalExposed = 0
+
+    for (const { base, scope } of locations) {
+      try {
+        const resolvedBase = await realpath(base)
+        const entries = await readdir(resolvedBase, { withFileTypes: true })
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue
+          if (entry.isSymbolicLink()) continue
+          if (excluded.has(entry.name)) continue
+          if (!isValidSkillName(entry.name)) continue
+
+          const hasActive = await readFile(join(resolvedBase, entry.name, "SKILL.md"), "utf-8")
+            .then(() => true)
+            .catch(() => false)
+          const hasDisabled = await readFile(join(resolvedBase, entry.name, "SKILL.md.disabled"), "utf-8")
+            .then(() => true)
+            .catch(() => false)
+          if (!hasActive || hasDisabled) continue
+
+          if (autoHide) {
+            await rename(
+              join(resolvedBase, entry.name, "SKILL.md"),
+              join(resolvedBase, entry.name, "SKILL.md.disabled")
+            ).catch(() => {})
+          }
+
+          if (scope === "project") projectExposed++
+          else globalExposed++
+        }
+      } catch { /* dir doesn't exist */ }
+    }
+
+    if (projectExposed > 0 || globalExposed > 0) {
+      const parts: string[] = []
+      if (projectExposed > 0) parts.push(`${projectExposed} project`)
+      if (globalExposed > 0) parts.push(`${globalExposed} global`)
+
+      if (autoHide) {
+        await client.tui.showToast({
+          body: { message: `${parts.join(", ")} skill(s) auto-hidden by triage`, variant: "info" },
+        })
+      } else {
+        // "unknown" state — plugin installed but /triage on never run
+        await client.tui.showToast({
+          body: { message: `${parts.join(", ")} skill(s) exposed — run /triage on to enable`, variant: "warning" },
+        })
+      }
+    }
+
+    // Watch for new SKILL.md files and auto-hide them (only when ON)
+    if (autoHide) {
+      for (const { base } of locations) {
+        try {
+          const resolvedBase = await realpath(base)
+          watch(resolvedBase, { recursive: true }, (event, filename) => {
+            if (event !== "rename" || typeof filename !== "string") return
+            const parts = filename.split(/[\\/]/)
+            if (parts.length < 2) return
+            if (excluded.has(parts[0])) return
+            if (!isValidSkillName(parts[0])) return
+            if (!filename.endsWith("SKILL.md")) return
+
+            const fullPath = join(resolvedBase, filename)
+            const disabledPath = fullPath + ".disabled"
+            rename(fullPath, disabledPath).catch(() => {})
+          })
+        } catch { /* dir doesn't exist */ }
+      }
+    }
+  })()
 
   return {
     tool: {

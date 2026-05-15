@@ -1,6 +1,6 @@
 # opencode-triage
 
-> Deterministic skill router for OpenCode. Save up to 90% of tokens **on skills** by hiding them from the system prompt and loading only when needed.
+> opencode-triage strips skill definitions from the main prompt and routes them on demand. Instead of loading every skill into every message, it uses keyword matching to activate only what you need. Cuts prompt token costs by up to 90% — no LLM overhead, no extra API calls, zero setup.
 
 ## What It Does
 
@@ -59,12 +59,8 @@ Install opencode-triage (https://github.com/cascharly/opencode-triage) — a det
 
 | Command | What it does |
 |---|---|
-| `/triage on` | Hide global skills |
-| `/triage on --local` | Hide this project's skills only |
-| `/triage on --both` | Hide skills in both scopes (global + local) |
-| `/triage off` | Expose global skills again |
-| `/triage off --local` | Expose this project's skills again |
-| `/triage off --both` | Expose skills in both scopes |
+| `/triage on` | Hide skills in both scopes (global + local) |
+| `/triage off` | Expose skills in both scopes (global + local) |
 | `/triage status` | See what's hidden and what's exposed |
 | `/triage compare` | Token savings estimate for your skills |
 
@@ -88,10 +84,10 @@ With a global skill A and a project skill B:
 
 | State | Global (A) | Project (B) | How to configure |
 |---|---|---|---|
-| Full exposure | exposed | exposed | (default) |
-| Triage in project only | exposed | hidden | `/triage on --local` |
-| Triage globally only | hidden | exposed | `/triage on` |
-| Full triage | hidden | hidden | `/triage on --both` (or `/triage on` then `/triage on --local`) |
+| Full exposure | exposed | exposed | `/triage off` (or default state) |
+| Full triage | hidden | hidden | `/triage on` |
+| Triage globally only | hidden | exposed | `/triage on --global` (advanced) |
+| Triage in project only | exposed | hidden | `/triage on --local` (advanced) |
 
 ## How It Works
 
@@ -174,7 +170,7 @@ This means adding a new skill to your triage-managed setup is as simple as creat
 Real data from this project (20 skills, full content):
 
 ```
-Cost Comparison
+Cost Comparison Global + Local
 
 Skills: 20 hidden · 0 exposed · 20 total
 
@@ -194,8 +190,6 @@ Top skills by full content size:
   security-monitoring            ~2971 tokens
   webhook-automation             ~2839 tokens
   database-sync                  ~2759 tokens
-
-At ~50 calls/day: ~49.7M tokens saved/month
 ```
 
 Run `/triage compare` for live numbers based on your skill inventory.

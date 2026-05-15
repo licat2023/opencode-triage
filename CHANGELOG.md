@@ -5,6 +5,18 @@ All notable changes to opencode-triage are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-05-15
+
+### Changed
+- Simplified CLI to a 2-command mental model: `/triage on` and `/triage off` toggle both local and global scopes by default.
+- CLI now persists ON/OFF state to plugin config, ensuring the setting is respected across OpenCode sessions.
+- `status` command UI simplified: labels show ON/OFF/MIXED based on actual skill file state rather than plugin config.
+- Output formats unified and polished.
+
+### Fixed
+- Addressed issue where `/triage off` would leave command files behind.
+- Plugin startup now correctly ignores `autoHide` if explicitly disabled by `/triage off`.
+
 ## [1.2.9] — 2026-05-13
 
 ### Added
