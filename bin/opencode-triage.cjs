@@ -171,7 +171,7 @@ function levenshtein(a, b) {
 }
 
 function suggestCommand(input) {
-  const commands = ["on", "off", "enable", "disable", "mode", "status", "compare", "version", "help"]
+  const commands = ["on", "off", "enable", "disable", "mode", "status", "dedupe", "compare", "version", "help"]
   let best = null, bestDist = Infinity
   for (const cmd of commands) {
     const d = levenshtein(input, cmd)
@@ -198,6 +198,9 @@ function main() {
       return toggle(false, toggleScope)
     case "status":
       return showStatus()
+    case "dedupe":
+    case "deduplicate":
+      return dedupeSkills()
     case "mode":
       const modeArg = FLAGS.find(f => f === "auto" || f === "manual")
       return setMode(modeArg || "auto", toggleScope)
@@ -219,7 +222,7 @@ function main() {
         console.error(`Unknown command: ${CMD}`)
       }
       console.error()
-      console.error(`Usage: /triage on | off | status | compare | version | help`)
+      console.error(`Usage: /triage on | off | status | dedupe | compare | version | help`)
       console.error(`Try /triage help for detailed usage.`)
       process.exit(1)
   }
@@ -562,6 +565,93 @@ function setMode(mode, scope) {
   console.log()
 }
 
+function findDuplicateNames(skills) {
+  const seen = {}
+  for (const s of skills) {
+    seen[s.name] = (seen[s.name] || 0) + 1
+  }
+  return new Set(Object.entries(seen).filter(([_, c]) => c > 1).map(([n]) => n))
+}
+
+// ── dedupe ────────────────────────────────────────────────
+
+function dedupeSkills() {
+  const skills = collectSkills()
+  const dupNames = findDuplicateNames(skills)
+
+  if (dupNames.size === 0) {
+    console.log()
+    console.log("No duplicate skills found. Nothing to deduplicate.")
+    console.log()
+    return
+  }
+
+  // Find project-level skills that are duplicates of a global skill
+  const toRemove = skills.filter(s => s.scope === "project" && dupNames.has(s.name))
+
+  if (toRemove.length === 0) {
+    console.log()
+    console.log("No project-level duplicates found to remove.")
+    console.log()
+    return
+  }
+
+  console.log()
+  console.log(BOLD + "Deduplicating skills" + RESET + DIM + " (removing project duplicates — global copies kept)" + RESET)
+  console.log()
+
+  let removed = 0
+  let errors = 0
+
+  for (const skill of toRemove) {
+    const files = []
+    const disabledPath = path.join(skill.dirPath, "SKILL.md.disabled")
+    const activePath = path.join(skill.dirPath, "SKILL.md")
+
+    if (fs.existsSync(disabledPath)) files.push(disabledPath)
+    if (fs.existsSync(activePath)) files.push(activePath)
+
+    if (files.length === 0) {
+      console.log(`  ${DIM}${skill.name.padEnd(30)} no skill files found${RESET}`)
+      continue
+    }
+
+    if (isDryRun) {
+      console.log(`  ${YELLOW}[would remove]${RESET}  ${skill.name.padEnd(30)} ${skill.label}(${files.map(f => path.basename(f)).join(", ")})`)
+      removed++
+      continue
+    }
+
+    let ok = true
+    for (const f of files) {
+      try {
+        fs.unlinkSync(f)
+      } catch (err) {
+        console.error(`  ${RED}[error]${RESET}  ${skill.name} — could not delete ${path.basename(f)}: ${err.message}`)
+        ok = false
+        errors++
+      }
+    }
+    if (ok) {
+      console.log(`  ${GREEN}[removed]${RESET}  ${skill.name.padEnd(30)} ${skill.label}`)
+      removed++
+    }
+  }
+
+  console.log()
+  if (isDryRun) {
+    console.log(`  ${removed} file(s) would be removed. No changes made. (use without --dry-run to apply)`)
+  } else {
+    console.log(`  ${removed} duplicate(s) removed. ${errors > 0 ? errors + " error(s). " : ""}`)
+    if (removed > 0) {
+      console.log()
+      console.log(YELLOW + "  Skills removed from project scope only — global copies remain intact." + RESET)
+      console.log(YELLOW + "  Restart opencode for changes to take effect." + RESET)
+    }
+  }
+  console.log()
+}
+
 // ── status ────────────────────────────────────────────────
 
 function calcHiddenSkillTokens() {
@@ -604,6 +694,7 @@ function calcHiddenSkillTokens() {
 function showStatus() {
   const { localActive, globalActive, localMode, globalMode } = collectConfigState()
   const skills = collectSkills()
+  const dupNames = findDuplicateNames(skills)
 
   const projSkills = skills.filter(s => s.scope === "project")
   const gloSkills = skills.filter(s => s.scope === "global")
@@ -665,7 +756,7 @@ function showStatus() {
       totals: { hidden: totalHidden, exposed: totalExposed, total: totalHidden + totalExposed },
       tokens_saved: netSavings > 0 ? netSavings : 0,
       out_of_sync: outOfSync.length > 0 ? outOfSync : null,
-      skills: skills.map(s => ({ name: s.name, state: s.state, scope: s.scope, dir: s.label })),
+      skills: skills.map(s => ({ name: s.name, state: s.state, scope: s.scope, dir: s.label, duplicate: dupNames.has(s.name) })),
     }
     console.log(JSON.stringify(json, null, 2))
     return
@@ -698,7 +789,9 @@ function showStatus() {
     console.log(`  ${DIM}── Project skills ──────────────────────────────────────${RESET}`)
     projSkills.forEach(s => {
       const badge = s.state === "hidden" ? GREEN + "[hidden]" + RESET : YELLOW + "[exposed]" + RESET
-      console.log(`  ${badge}  ${s.name.padEnd(30)} ${s.label}`)
+      const dupTag = dupNames.has(s.name) ? YELLOW + "[dup]" + RESET : ""
+      const pad = 30 - (dupTag ? 5 : 0)
+      console.log(`  ${badge}  ${s.name.padEnd(pad)} ${dupTag} ${s.label}`)
     })
     console.log()
   }
@@ -708,7 +801,9 @@ function showStatus() {
     console.log(`  ${DIM}── Global skills ───────────────────────────────────────${RESET}`)
     gloSkills.slice(0, maxShow).forEach(s => {
       const badge = s.state === "hidden" ? GREEN + "[hidden]" + RESET : YELLOW + "[exposed]" + RESET
-      console.log(`  ${badge}  ${s.name.padEnd(30)} ${s.label}`)
+      const dupTag = dupNames.has(s.name) ? YELLOW + "[dup]" + RESET : ""
+      const pad = 30 - (dupTag ? 5 : 0)
+      console.log(`  ${badge}  ${s.name.padEnd(pad)} ${dupTag} ${s.label}`)
     })
     if (!showAll && gloSkills.length > maxShow) {
       console.log(`  ${DIM}  ... and ${gloSkills.length - maxShow} more${RESET}`)
@@ -717,6 +812,10 @@ function showStatus() {
   }
 
   const savedLabel = netSavings > 0 ? netSavings.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : "0"
+  const dupCount = dupNames.size
+  if (dupCount > 0) {
+    console.log(`  ${YELLOW}${dupCount} duplicate(s) found — run /triage dedupe to remove project-level dupes${RESET}`)
+  }
   console.log(`  ${DIM}~${savedLabel} tokens saved from prompt${RESET}`)
 
   if (skills.length === 0) {
@@ -938,7 +1037,7 @@ function showHelp() {
   if (isJson) {
     console.log(JSON.stringify({
       version: CURRENT_VERSION,
-      commands: ["on", "off", "status", "compare", "version", "help"],
+      commands: ["on", "off", "status", "dedupe", "compare", "version", "help"],
       flags: ["--local", "--global", "--both", "--json", "--quiet", "--dry-run", "--all"],
     }, null, 2))
     return
@@ -949,6 +1048,7 @@ function showHelp() {
   console.log("  " + BOLD + "on" + RESET + "       Hide all skills from the AI prompt   (restart after)")
   console.log("  " + BOLD + "off" + RESET + "      Expose all skills to the AI prompt    (restart after)")
   console.log("  " + BOLD + "status" + RESET + "   Show current state and skill counts")
+  console.log("  " + BOLD + "dedupe" + RESET + "  Remove project-level duplicate skills")
   console.log("  " + BOLD + "compare" + RESET + "  Token/time cost comparison")
   console.log("  " + BOLD + "version" + RESET + "  Show version and check for updates")
   console.log("  " + BOLD + "help" + RESET + "     Show this help")

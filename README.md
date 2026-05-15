@@ -66,15 +66,16 @@ Install opencode-triage (https://github.com/cascharly/opencode-triage) — a det
 | `/triage on` | Hide skills in both scopes (global + local) |
 | `/triage off` | Expose skills in both scopes (global + local) |
 | `/triage status` | See what's hidden and what's exposed |
+| `/triage dedupe` | Remove project-level duplicates of global skills |
 | `/triage compare` | Token savings estimate for your skills |
 
 ### Flags
 
 | Flag | Where | What it does |
-|---|---|---|
+|------|-------|--------------|
 | `--json` | All commands | Machine-readable JSON output |
 | `--quiet` | on/off | Suppress non-error output |
-| `--dry-run` | on/off | Preview changes without renaming |
+| `--dry-run` | on/off, dedupe | Preview changes without renaming |
 | `--all` | status | Show full skill list without truncation |
 
 All commands can also be run directly in your terminal via `npx opencode-triage <command>` (e.g., `npx opencode-triage on --local`, `npx opencode-triage on --both`). No OpenCode session needed.
