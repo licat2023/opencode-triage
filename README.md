@@ -1,29 +1,6 @@
 # opencode-triage
 
-> OpenCode already lazy-loads skill bodies — but it still injects every skill's name and description (from `SKILL.md` frontmatter) into the prompt on every message. With a growing skill library and verbose descriptions, that can mean hundreds of tokens burned before you type a word. opencode-triage eliminates that XML list entirely, replacing it with a single 59-token tool definition and routing on-demand via keyword matching.
-
-## What It Does
-
-**This plugin saves tokens on skills only.** The rest of your system prompt (instructions, MCP tools, etc.) is untouched.
-
-OpenCode already lazy-loads full skill bodies — they're only fetched when the LLM explicitly calls the `skill()` tool. What it always injects, on every message, is a listing of every skill's name and description (from `SKILL.md` frontmatter) inside the `skill` tool definition:
-
-```xml
-<available_skills>
-  <skill><name>llm-security</name><description>Security guidelines for LLM applications...</description></skill>
-  <skill><name>semgrep</name><description>Run Semgrep static analysis scans...</description></skill>
-  ... (grows with every skill you add)
-</available_skills>
-```
-
-With triage ON, all `SKILL.md` files are renamed to `.disabled` — OpenCode's skill tool disappears entirely. Only the triage tool remains (59 tokens). The right skill body is still fetched on demand when needed, same as before.
-
-```
-No triage:   [name+desc of A] [name+desc of B] [name+desc of C] ...  ← every message
-With triage: triage({ query }) → keyword match → loads one skill body when needed
-```
-
-Since only the matched skill is loaded at lookup time, you can install virtually unlimited skills without burning any tokens on their idle name+description listings. And because the native `<available_skills>` XML grows with every skill you add, **the more skills you install, the more triage saves** — each new skill adds its name+description to the native prompt on every message, but adds zero tokens when triage is on.
+> OpenCode already lazy-loads full skill bodies — but it still injects every skill's name and description (from `SKILL.md` frontmatter) into the prompt on every message. With a growing skill library and verbose descriptions, that can mean hundreds of tokens burned before you type a word. opencode-triage eliminates that XML list entirely, replacing it with a compact tool definition and routing on-demand via keyword matching.
 
 ## Quick Start
 
@@ -33,19 +10,18 @@ npm install -g opencode-triage
 
 Restart OpenCode, then type `/triage on`. That's it.
 
-## Install
+## What It Does
 
-### Global (recommended)
+OpenCode lists every skill's name and description in the prompt on every message. With many skills, that burns hundreds of tokens before you type a word.
 
-Same as Quick Start above. `/triage` is available in **every** project.
+Triage hides all skills from the prompt. When you need one, the LLM calls `triage()` — the plugin finds the best match by keyword scoring and loads only that skill's instructions.
 
-### Per-project
-
-```bash
-npm install opencode-triage
+```
+No triage:   [name+desc of A] [name+desc of B] [name+desc of C] ...  ← every message
+With triage: triage({ query }) → keyword match → loads one skill body when needed
 ```
 
-Restart OpenCode. `/triage` is available only in this project. Type `/triage on --local` to enable.
+**The more skills you install, the more triage saves.** Each new skill adds tokens to the native prompt, but zero tokens when triage is on.
 
 ## LLM Quick-Install
 
@@ -63,11 +39,13 @@ Install opencode-triage (https://github.com/cascharly/opencode-triage) — a det
 
 | Command | What it does |
 |---|---|
-| `/triage on` | Hide skills in both scopes (global + local) |
-| `/triage off` | Expose skills in both scopes (global + local) |
-| `/triage status` | See what's hidden and what's exposed |
+| `/triage on` | Enable hooks to hide skills from the LLM prompt (global + local) |
+| `/triage off` | Disable hooks, restore skills to the LLM prompt (global + local) |
+| `/triage status` | See hook state and skill visibility |
 | `/triage dedupe` | Remove project-level duplicates of global skills |
 | `/triage compare` | Token savings estimate for your skills |
+
+> **Note:** Skills are hidden via hooks at the LLM prompt level — `SKILL.md` files stay intact on disk, so other AI tools (Cursor, Claude Code, Windsurf) still see them. File renaming (`SKILL.md` ↔ `SKILL.md.disabled`) is only used as a fallback for older OpenCode versions without hook support. When files are renamed to `.disabled`, they will also be hidden from other AI tools that scan the same directories.
 
 ### Flags
 
@@ -75,28 +53,26 @@ Install opencode-triage (https://github.com/cascharly/opencode-triage) — a det
 |------|-------|--------------|
 | `--json` | All commands | Machine-readable JSON output |
 | `--quiet` | on/off | Suppress non-error output |
-| `--dry-run` | on/off, dedupe | Preview changes without renaming |
+| `--dry-run` | dedupe | Preview changes without renaming |
 | `--all` | status | Show full skill list without truncation |
 
-All commands can also be run directly in your terminal via `npx opencode-triage <command>` (e.g., `npx opencode-triage on --local`, `npx opencode-triage on --both`). No OpenCode session needed.
+All commands also work in your terminal: `npx opencode-triage <command>`. No OpenCode session needed.
+
+### Configuration Combinations
+
+| State | Global | Project | How to configure |
+|---|---|---|---|
+| Full exposure | exposed | exposed | `/triage off` (default) |
+| Full triage | hidden | hidden | `/triage on` |
+| Triage globally only | hidden | exposed | `/triage on --global` |
+| Triage in project only | exposed | hidden | `/triage on --local` |
 
 Global affects `~/.config/opencode/skills/`, `~/.claude/skills/`, `~/.agents/skills/`.
 Local affects `.opencode/skills/`, `.claude/skills/`, `.agent/skills/`, `.agents/skills/` in the current project.
 
-### Configuration Combinations
-
-With a global skill A and a project skill B:
-
-| State | Global (A) | Project (B) | How to configure |
-|---|---|---|---|
-| Full exposure | exposed | exposed | `/triage off` (or default state) |
-| Full triage | hidden | hidden | `/triage on` |
-| Triage globally only | hidden | exposed | `/triage on --global` (advanced) |
-| Triage in project only | exposed | hidden | `/triage on --local` (advanced) |
-
 ## How It Works
 
-The LLM calls `triage()` when it encounters a task it can't handle with general knowledge. The plugin scores all hidden skills against the query using keyword matching and returns the best match.
+The LLM calls `triage()` when it encounters a task it can't handle with general knowledge. The plugin scores all hidden skills against the query and returns the best match.
 
 ```
 User: "backup my database"
@@ -113,66 +89,31 @@ Plugin: scans filesystem → scores skills → returns best match
 
 No LLM reasoning overhead. No extra API calls. Just fast deterministic matching.
 
+### Spell Correction
+
+If a query word doesn't match any skill, the plugin suggests the closest correction (e.g., `scurity` → `security`) and passes it to the LLM as a hint. The LLM can retry silently — no user-facing error.
+
 ### Why "Triage"?
 
-In emergency medicine, a triage nurse quickly assesses each patient's condition and routes them to the right specialist — never loading every patient into every doctor's office at once. Same idea here.
+In emergency medicine, a triage nurse quickly assesses each patient and routes them to the right specialist — never loading every patient into every doctor's office at once. Same idea here.
 
+## Install
 
-## Under the Hood
+### Global (recommended)
 
-### Plugin Activation
+Same as Quick Start above. `/triage` is available in **every** project.
 
-`opencode-triage` is a standard opencode plugin registered in the `"plugin"` array of `opencode.json` (both `~/.config/opencode/opencode.jsonc` globally and `.opencode/opencode.json` per-project). On startup, opencode loads all listed plugins, making their tools and commands available. The plugin registers the `triage` tool in the system prompt alongside `read`, `write`, `bash`, etc.
+### Per-project
 
-### How Hiding Skills Works
-
-Skills live in up to seven directories:
-
-| Path | Scope |
-|------|-------|
-| `.opencode/skills/<name>/` | Project |
-| `.claude/skills/<name>/` | Project |
-| `.agent/skills/<name>/` | Project |
-| `.agents/skills/<name>/` | Project |
-| `~/.config/opencode/skills/<name>/` | Global |
-| `~/.claude/skills/<name>/` | Global |
-| `~/.agents/skills/<name>/` | Global |
-
-When you run `/triage on`, the CLI renames every `SKILL.md` to `SKILL.md.disabled` across all seven directories. OpenCode's system prompt only loads files named `SKILL.md` (not `.disabled`), so all skills disappear from the prompt instantly.
-
-```
-Before (/triage on):
-  .agent/skills/backup-restore/SKILL.md          ← name+desc listed in prompt
-  ~/.agents/skills/database-sync/SKILL.md        ← name+desc listed in prompt
-
-After (/triage on):
-  .agent/skills/backup-restore/SKILL.md.disabled  ← hidden
-  ~/.agents/skills/database-sync/SKILL.md.disabled ← hidden
+```bash
+npm install opencode-triage
 ```
 
-`/triage off` reverses the operation — it renames every `SKILL.md.disabled` back to `SKILL.md`, restoring native discovery.
+Restart OpenCode. `/triage` is available only in this project. Type `/triage on --local` to enable.
 
-The `/triage status` command detects the current state by scanning all seven directories for both `.md` and `.md.disabled` extensions, showing skills grouped by scope with `[hidden]`/`[exposed]` colored badges. It also warns when the plugin is ACTIVE but some skills remain exposed (out-of-sync state).
+## Token Savings
 
-### How Routing Works
-
-The triage router is a registered plugin tool. When called, it runs a deterministic 5-step routing process:
-
-1. **Discover** — Scans directories for skill files, extracts name and description from frontmatter. Results are cached with a 5s TTL so CLI toggles are picked up without restart.
-
-2. **Match** — Scores query keywords against each skill — exact word match = 15pts, partial = 10pts. Found in name → ×3, found in description → ×1. Name matches dominate.
-
-3. **Route** — Auto-selects the clear winner (gap ≥ 30) or returns a top-5 shortlist for manual pick.
-
-4. **Load** — Reads the matched file, strips frontmatter, returns the instructions.
-
-5. **Notify** — Shows a TUI toast confirming the routing result.
-
-## Token Savings (skills only)
-
-Real data from this project (19 skills). The comparison is between what lives in the
-prompt on **every message** — full skill bodies are fetched on-demand in both modes
-and cost the same either way.
+Example data from this project (19 skills). Numbers will vary based on your skill library and description verbosity. Run `/triage compare` for live numbers.
 
 ```
 Cost Comparison Global + Local
@@ -197,15 +138,11 @@ Top skills by name+desc size (what actually costs per-prompt):
   context7-mcp                   ~84 tokens   (full body: ~641)
 ```
 
-> **Note:** description verbosity directly drives prompt cost. `llm-security`'s
-> 167-token description is the single biggest cost driver here — keep descriptions
-> specific but concise for maximum savings.
-
 Run `/triage compare` for live numbers based on your skill inventory.
 
 ## Cross-Tool Impact
 
-Triage renames `SKILL.md` → `SKILL.md.disabled` on disk. Other AI tools that scan the same directories (Claude Code, Cursor, Windsurf) will not see them either — the skills are hidden from all tools. Run `/triage off` to restore.
+Triage hides skills from the LLM prompt using hooks — `SKILL.md` files stay intact on disk. Other AI tools that scan the same directories (Claude Code, Cursor, Windsurf) will still see them normally. Run `/triage off` to restore the native skill tool for OpenCode.
 
 Use `/triage on --local` to isolate triage to one project without affecting global skills.
 
@@ -227,15 +164,72 @@ Delete the command file if present:
 
 ```shell
 rm ~/.config/opencode/commands/triage.md           # macOS / Linux
-```
-
-```cmd
 del %USERPROFILE%\.config\opencode\commands\triage.md  # Windows (cmd)
 ```
 
 Restart OpenCode. Clean.
 
 For per-project installs, remove `"opencode-triage"` from `.opencode/opencode.json` and run `npm uninstall opencode-triage`.
+
+## Under the Hood
+
+### Plugin Activation
+
+`opencode-triage` is a standard OpenCode plugin registered in the `"plugin"` array of `opencode.json` (both `~/.config/opencode/opencode.jsonc` globally and `.opencode/opencode.json` per-project). On startup, OpenCode loads all listed plugins, making their tools and commands available. The plugin registers the `triage` tool in the system prompt alongside `read`, `write`, `bash`, etc.
+
+### How Hiding Skills Works
+
+Skills live in up to seven directories:
+
+| Path | Scope |
+|------|-------|
+| `.opencode/skills/<name>/` | Project |
+| `.claude/skills/<name>/` | Project |
+| `.agent/skills/<name>/` | Project |
+| `.agents/skills/<name>/` | Project |
+| `~/.config/opencode/skills/<name>/` | Global |
+| `~/.claude/skills/<name>/` | Global |
+| `~/.agents/skills/<name>/` | Global |
+
+When triage is ON, skills are hidden from the LLM using three layers of hooks — no file renaming needed:
+
+1. **`tool.definition`** — Replaces the built-in `skill` tool description with "Use `triage` instead"
+2. **`system.transform`** — Strips the `<available_skills>` XML block from the system prompt
+3. **`tool.execute.before`** — Intercepts any stray `skill()` calls and blocks them
+
+`SKILL.md` files stay intact on disk. Other AI tools (Claude Code, Cursor, Windsurf) scanning the same directories still see them normally.
+
+The CLI can still rename files (`SKILL.md` ↔ `SKILL.md.disabled`) as a fallback for older OpenCode versions without hook support, and to migrate users upgrading from the old file-rename mode. On startup, any remaining `.disabled` files are restored to `.md` since hooks handle hiding.
+
+The `/triage status` command shows skills grouped by scope with `[hidden]`/`[exposed]` badges, detecting state from both hook config and file extensions. It warns when the plugin is ACTIVE but some skills remain exposed (out-of-sync state).
+
+### How Routing Works
+
+The triage router is a registered plugin tool. When called, it runs a deterministic routing process:
+
+1. **Discover** — Scans directories for skill files, extracts name and description from frontmatter. Results are cached in memory (5s TTL) so CLI toggles are picked up without restart. The cache stores only skill metadata (name, description, path) — minimal RAM usage, typically a few KB even with dozens of skills.
+
+2. **Match** — Scores query keywords against each skill — exact word match = 15pts, partial = 10pts. Found in name → ×3, found in description → ×1. Name matches dominate. IDF weighting downweights common words and boosts rare, discriminating terms. Bigram and exact phrase bonuses reward skills whose descriptions match query phrasing. Position decay weights earlier query words more heavily. Lightweight stemming normalizes inflected forms (`vulnerabilities` → `vulnerability`). Project-scoped skills get a small tiebreaker bonus (+5) over equally-matched global skills.
+
+3. **Spell Correction** — If a query word (length ≥ 4) has no exact match in any skill name or description, the plugin computes Levenshtein distance against all skill vocabulary and suggests the closest match (distance ≤ 2). The hint is injected into the tool result for the LLM to self-correct silently.
+
+4. **Route** — Auto-selects the clear winner (gap ≥ 30) or returns a top-5 shortlist for manual pick. Spell correction hints are included in all response paths so the LLM can retry with the corrected term if needed.
+
+5. **Load** — Reads the matched file, strips frontmatter, returns the instructions.
+
+6. **Notify** — Shows a TUI toast confirming the routing result.
+
+### Code Structure
+
+| File | Purpose |
+|------|---------|
+| `index.ts` | Plugin entry point, tool registration, hook setup |
+| `discovery.ts` | File scanning, skill reading, rename migration |
+| `scoring.ts` | Scoring pipeline: IDF, bigram/phrase bonuses, stemming, position decay |
+| `spellcheck.ts` | Levenshtein distance, spell correction suggestions |
+| `config.ts` | Constants, types, triage state, JSONC parsing |
+| `remote.ts` | Remote skill search (registry, superpowers) |
+| `utils.ts` | Shared utilities: stripBOM, frontmatter extraction, regex helpers, security |
 
 ## Compatibility
 

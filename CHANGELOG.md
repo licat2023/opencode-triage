@@ -5,6 +5,24 @@ All notable changes to opencode-triage are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] — 2026-05-16
+
+### Added
+
+- **Spell correction hints** — when a query contains unmatched words (length ≥ 4), the plugin computes Levenshtein distance against all skill names and descriptions, and injects a hint into the tool result for the LLM to self-correct silently. Transparent to the user. Examples: `scurity` → `security`, `broweser` → `browser`, `devop` → `devops`. Zero false positives on short words, gibberish, or niche terms.
+- Hints injected into all 4 response paths: routed match, multiple candidates, no-match, and find-skills fallback.
+- **`/triage dedupe` now interactive** — instead of auto-removing project-level duplicates, prompts user to choose which copy to delete: `[l]ocal` or `[g]lobal`. Shows both paths for each duplicate group. `--dry-run` still previews without prompting.
+- `stem(word)` exported from `utils.ts` — lightweight suffix stripper, useful for downstream consumers that want the same normalisation.
+- 12 new tests covering `stem` unit behaviour, stemming integration in `scoreSkills`, name-tokenisation bigrams, and scope tiebreaker edge cases (114 tests total).
+- 18 spell correction simulation tests covering clean queries, single typos, multiple typos, gibberish, scrambled names, extra letters, and niche terms. All 114 tests pass.
+
+### Changed
+
+- **Scoring pipeline overhauled** — auto-route rate improved. No user-facing behavior change; routing accuracy increases transparently.
+- **Code modularized** — split `index.ts` (650 lines) and `utils.ts` (482 lines) into 7 focused files: `index.ts` (plugin + hooks), `discovery.ts` (file scanning, reading, rename migration), `scoring.ts` (scoring pipeline, IDF, stemming), `spellcheck.ts` (Levenshtein, suggestion engine), `config.ts` (constants, types, triage state, JSONC parsing), `remote.ts` (remote skill search), `utils.ts` (shared utilities). Easier to maintain and test.
+- All imports switched from `.js` to `.ts` extensions with `allowImportingTsExtensions` enabled in `tsconfig.json`.
+- CLI help output column alignment fixed using ANSI-code-aware padding (`cmdCol=10`, `flagCol=12`).
+
 ## [1.3.2] — 2026-05-15
 
 ### Added

@@ -1,12 +1,18 @@
 /*
  * opencode-triage — Skill Router Plugin
  * ======================================
- * Version: 1.2.7
+ * Version: 1.3.0
  * License: MIT
  *
  * Deterministic skill routing for OpenCode. Registers a `triage()` custom tool
- * that discovers SKILL.md(.disabled) files and routes LLM queries to matching
- * skills via keyword scoring — no PowerShell, no LLM parsing overhead.
+ * that discovers SKILL.md files and routes LLM queries to matching skills via
+ * keyword scoring.
+ *
+ * Layers of defense (no file renaming needed when hooks are available):
+ *   1. tool.definition    — replaces built-in `skill` tool description
+ *   2. system.transform   — strips <available_skills> from system prompt
+ *   3. tool.execute.before — intercepts stray skill() calls
+ *   4. File rename        — CLI fallback when hooks not supported
  *
  * Install:  { "plugin": ["opencode-triage"] }  in opencode.json
  * Toggle:   /triage on   |   /triage off
@@ -15,127 +21,69 @@
 
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import { homedir } from "node:os"
-import { join, basename } from "node:path"
-import { readFileSync, watch } from "node:fs"
-import { readdir, readFile, realpath, rename } from "node:fs/promises"
-import notify from "./notify.js"
-import {
-  THRESHOLD,
-  MIN_WORD_LENGTH,
-  NAME_WEIGHT,
-  DESC_WEIGHT,
-  MAX_SKILL_SIZE,
-  stripBOM,
-  extractFrontmatter,
-  scoreSkills,
-  getWordBonus,
-  escapeRegex,
-  isValidSkillName,
-} from "./utils.js"
-import type { SkillEntry, ScoredSkill } from "./utils.js"
+import { join } from "node:path"
+import { createRequire } from "node:module"
+import { buildSkillLocations, discoverAllSkills, renameSkills, readSkillContent } from "./discovery.ts"
+import { scoreSkills } from "./scoring.ts"
+import { suggestCorrections } from "./spellcheck.ts"
+import { THRESHOLD, checkTriageState } from "./config.ts"
+import type { SkillEntry } from "./config.ts"
 
-// Exclude the triage skill itself — self-referencing would create infinite loops
-// Can be overridden via OPENCODE_TRIAGE_EXCLUDED env var (comma-separated)
-// Fixes edge case #13: previously hardcoded, no way to allow a skill named "triage"
-const getExcludedSkills = (): Set<string> => {
-  const env = process.env.OPENCODE_TRIAGE_EXCLUDED
-  if (env) return new Set(env.split(",").map(s => s.trim()).filter(Boolean))
-  return new Set(["triage"])
-}
+const require = createRequire(import.meta.url)
+const CURRENT_VERSION: string = (() => {
+  try { return require("../package.json").version }
+  catch { return "0.0.0" }
+})()
 
-/**
- * Builds the list of directories to scan for skill files.
- *
- * Searches both project-level (`.agent/`, `.agents/`, `.claude/`, `.opencode/`)
- * and global (`~/.agents/`, `~/.claude/`, `~/.config/opencode/`) skills directories.
- * Project skills take precedence over global skills of the same name.
- *
- * @param worktree - Git worktree root or current working directory
- */
-function buildSkillLocations(worktree: string) {
-  return [
-    { base: join(worktree, ".agent", "skills"), scope: "project" as const },
-    { base: join(worktree, ".agents", "skills"), scope: "project" as const },
-    { base: join(worktree, ".claude", "skills"), scope: "project" as const },
-    { base: join(worktree, ".opencode", "skills"), scope: "project" as const },
-    { base: join(homedir(), ".agents", "skills"), scope: "global" as const },
-    { base: join(homedir(), ".claude", "skills"), scope: "global" as const },
-    { base: join(homedir(), ".config", "opencode", "skills"), scope: "global" as const },
-  ]
-}
-
-function stripJsoncComments(text: string): string {
-  let result = ""
-  let inString = false
-  let escape = false
-  let i = 0
-  while (i < text.length) {
-    const ch = text[i]
-    if (escape) { result += ch; escape = false; i++; continue }
-    if (ch === "\\" && inString) { result += ch; escape = true; i++; continue }
-    if (ch === '"') { inString = !inString; result += ch; i++; continue }
-    if (!inString && ch === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++
-      continue
-    }
-    if (!inString && ch === "/" && text[i + 1] === "*") {
-      i += 2
-      while (i < text.length - 1 && !(text[i] === "*" && text[i + 1] === "/")) i++
-      i += 2
-      continue
-    }
-    result += ch; i++
+function semverGt(a: string, b: string): boolean {
+  const pa = a.split(".").map(Number)
+  const pb = b.split(".").map(Number)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = pa[i] ?? 0
+    const nb = pb[i] ?? 0
+    if (na > nb) return true
+    if (na < nb) return false
   }
-  return result
+  return false
 }
 
-/** Returns the configured triage state from a single config file. */
-function getTriageState(path: string): "on" | "off" | "unknown" {
+async function checkForUpdate(tui: any): Promise<void> {
   try {
-    const raw = readFileSync(path, "utf-8")
-    const json = JSON.parse(stripJsoncComments(raw))
-    const plugin: unknown[] = json.plugin ?? []
-    for (const p of plugin) {
-      if (!Array.isArray(p) || p[0] !== "opencode-triage") continue
-      const opts = p[1] as Record<string, unknown> | undefined
-      if (opts?.autoHide === true)  return "on"
-      if (opts?.autoHide === false) return "off"
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 3000)
+    const res = await fetch("https://registry.npmjs.org/opencode-triage/latest", {
+      signal: controller.signal,
+    })
+    clearTimeout(timeout)
+    if (!res.ok) return
+    const pkg = await res.json() as { version?: string }
+    const latest = pkg.version
+    if (latest && semverGt(latest, CURRENT_VERSION)) {
+      await tui.showToast({
+        body: {
+          message: `Update available: ${CURRENT_VERSION} → ${latest} — npm install -g opencode-triage@latest`,
+          variant: "warning",
+        },
+      })
     }
-    return "unknown"
-  } catch { return "unknown" }
-}
-
-/**
- * Resolves the effective triage state from plugin options + config files.
- * Priority: plugin options → local config → global config.
- * Returns "on" | "off" | "unknown" (never configured).
- */
-async function checkTriageState(
-  worktree: string,
-  options: Record<string, unknown> | undefined
-): Promise<"on" | "off" | "unknown"> {
-  if (options?.autoHide === true)  return "on"
-  if (options?.autoHide === false) return "off"
-  const paths = [
-    join(worktree, ".opencode", "opencode.json"),
-    join(worktree, ".opencode", "opencode.jsonc"),
-    join(homedir(), ".config", "opencode", "opencode.json"),
-    join(homedir(), ".config", "opencode", "opencode.jsonc"),
-  ]
-  for (const p of paths) {
-    const state = getTriageState(p)
-    if (state !== "unknown") return state
+  } catch {
+    // Silent fail — network errors are non-critical
   }
-  return "unknown"
 }
 
 /**
  * Triage skill router plugin — main entry point.
  *
- * Registers the `triage` and `notify` custom tools, plus a
- * `tool.execute.after` hook that renders TUI toasts for routing
- * results and explicit notification calls.
+ * Registers the `triage` and `notify` custom tools, plus a layered
+ * defense system that hides the native `skill` tool from the LLM:
+ *
+ *   Layer 1: `tool.definition` — replaces skill tool description
+ *   Layer 2: `experimental.chat.system.transform` — strips skills XML
+ *   Layer 3: `tool.execute.before` — intercepts stray skill() calls
+ *   Fallback: CLI file rename — when hooks aren't supported
+ *
+ * Skills are discovered from SKILL.md (primary) with SKILL.md.disabled
+ * as fallback for users on older OpenCode versions.
  */
 export const server: Plugin = async ({ worktree, client }, options) => {
   // Cache: discovered skills per worktree, with timestamp for invalidation
@@ -144,112 +92,202 @@ export const server: Plugin = async ({ worktree, client }, options) => {
   let cache: { skills: SkillEntry[]; timestamp: number } | null = null
   const CACHE_TTL_MS = 5_000 // Re-discover every 5s to catch CLI toggles
 
+  // Rate limiting: track triage calls to prevent excessive LLM tool usage
+  // Mitigates unbounded consumption attacks (LLM010)
+  let triageCallCount = 0
+  let triageCallWindowStart = Date.now()
+  const TRIAGE_MAX_CALLS = 20
+  const TRIAGE_WINDOW_MS = 60_000 // 60 seconds
+
+  /**
+   * Checks if the triage tool is within its rate limit.
+   *
+   * Resets the counter if the time window has elapsed. Returns false
+   * if the maximum number of calls has been exceeded within the window.
+   *
+   * @returns true if the call is allowed, false if rate limited
+   */
+  function checkTriageRateLimit(): boolean {
+    const now = Date.now()
+    if (now - triageCallWindowStart > TRIAGE_WINDOW_MS) {
+      triageCallCount = 0
+      triageCallWindowStart = now
+    }
+    triageCallCount++
+    return triageCallCount <= TRIAGE_MAX_CALLS
+  }
+
+  /**
+   * Returns cached skills, re-discovering if the cache has expired.
+   *
+   * Uses a time-based cache (5s TTL) to balance performance with
+   * responsiveness to file system changes (e.g., CLI toggles).
+   *
+   * @returns Array of discovered skill entries
+   */
   async function getCachedSkills(): Promise<SkillEntry[]> {
     const now = Date.now()
     if (cache === null || now - cache.timestamp > CACHE_TTL_MS) {
       const locations = buildSkillLocations(worktree)
-      cache = { skills: await discoverAllSkills(locations), timestamp: now }
+      cache = { skills: await discoverAllSkills(locations, getExcludedSkills), timestamp: now }
     }
     return cache.skills
   }
 
-  // Startup: apply persisted ON/OFF state
+  // Cache triage state so hooks don't re-read config files on every call
+  let triageStateCache: { state: "on" | "off" | "unknown"; ts: number } | null = null
+
+  /**
+   * Returns the cached triage state, re-checking if the cache has expired.
+   *
+   * @returns Current triage state: "on", "off", or "unknown"
+   */
+  async function getTriageState(): Promise<"on" | "off" | "unknown"> {
+    const now = Date.now()
+    if (triageStateCache === null || now - triageStateCache.ts > CACHE_TTL_MS) {
+      triageStateCache = { state: await checkTriageState(worktree, options), ts: now }
+    }
+    return triageStateCache.state
+  }
+
+  // Exclude the triage skill itself — self-referencing would create infinite loops
+  // Can be overridden via OPENCODE_TRIAGE_EXCLUDED env var (comma-separated)
+  // Fixes edge case #13: previously hardcoded, no way to allow a skill named "triage"
+  const getExcludedSkills = (): Set<string> => {
+    const env = process.env.OPENCODE_TRIAGE_EXCLUDED
+    if (env) return new Set(env.split(",").map(s => s.trim()).filter(Boolean))
+    return new Set(["triage"])
+  }
+
+  // Definition hook state tracking
+  let definitionHookFired = false
+  let migrationCompleted = false
+
+  // Hook support detection: tool.definition fires before any tool execution.
+  // If it hasn't fired by the first triage() call, hooks aren't supported.
+  let hooksConfirmed = false
+  let fallbackTriggered = false
+
+  /**
+   * Migrates any remaining .disabled files to .md when hooks are detected.
+   *
+   * Called once on first definition hook fire. Ensures users upgrading
+   * from file-rename mode to hooks mode have their skills restored.
+   */
+  async function remigrateIfHooksDetected() {
+    if (migrationCompleted) return
+    migrationCompleted = true
+    const count = await renameSkills(".md.disabled", getExcludedSkills)
+    if (count > 0) {
+      await client.tui.showToast({
+        body: { message: `Migrated ${count} skill(s) from file-rename to hooks mode`, variant: "info" },
+      })
+    }
+  }
+
+  // Startup: show status toast based on current triage state.
+  // Do NOT restore .disabled files here — wait for hooks to confirm support.
+  // If hooks fire, remigrateIfHooksDetected() restores them.
+  // If hooks don't fire, skills stay hidden via .disabled files (file-rename fallback).
   ;(async () => {
-    const triageState = await checkTriageState(worktree, options)
-
-    // Explicitly OFF — user ran /triage off. Do nothing this session.
-    if (triageState === "off") return
-
-    const autoHide = triageState === "on"
-    const locations = buildSkillLocations(worktree)
-    const excluded = getExcludedSkills()
-    let projectExposed = 0
-    let globalExposed = 0
-
-    for (const { base, scope } of locations) {
-      try {
-        const resolvedBase = await realpath(base)
-        const entries = await readdir(resolvedBase, { withFileTypes: true })
-        for (const entry of entries) {
-          if (!entry.isDirectory()) continue
-          if (entry.isSymbolicLink()) continue
-          if (excluded.has(entry.name)) continue
-          if (!isValidSkillName(entry.name)) continue
-
-          const hasActive = await readFile(join(resolvedBase, entry.name, "SKILL.md"), "utf-8")
-            .then(() => true)
-            .catch(() => false)
-          const hasDisabled = await readFile(join(resolvedBase, entry.name, "SKILL.md.disabled"), "utf-8")
-            .then(() => true)
-            .catch(() => false)
-          if (!hasActive || hasDisabled) continue
-
-          if (autoHide) {
-            await rename(
-              join(resolvedBase, entry.name, "SKILL.md"),
-              join(resolvedBase, entry.name, "SKILL.md.disabled")
-            ).catch(() => {})
-          }
-
-          if (scope === "project") projectExposed++
-          else globalExposed++
-        }
-      } catch { /* dir doesn't exist */ }
-    }
-
-    if (projectExposed > 0 || globalExposed > 0) {
-      const parts: string[] = []
-      if (projectExposed > 0) parts.push(`${projectExposed} project`)
-      if (globalExposed > 0) parts.push(`${globalExposed} global`)
-
-      if (autoHide) {
+    const state = await getTriageState()
+    if (state === "on") {
+      const skills = await getCachedSkills()
+      const projectN = skills.filter(s => s.scope === "project").length
+      const globalN = skills.filter(s => s.scope === "global").length
+      if (projectN > 0 || globalN > 0) {
         await client.tui.showToast({
-          body: { message: `${parts.join(", ")} skill(s) auto-hidden by triage`, variant: "info" },
-        })
-      } else {
-        // "unknown" state — plugin installed but /triage on never run
-        await client.tui.showToast({
-          body: { message: `${parts.join(", ")} skill(s) exposed — run /triage on to enable`, variant: "warning" },
+          body: { message: `${projectN + globalN} skill(s) managed by triage`, variant: "info" },
         })
       }
+    } else if (state === "unknown") {
+      await client.tui.showToast({
+        body: { message: `Triage installed — run /triage on to enable`, variant: "warning" },
+      })
     }
-
-    // Watch for new SKILL.md files and auto-hide them (only when ON)
-    if (autoHide) {
-      for (const { base } of locations) {
-        try {
-          const resolvedBase = await realpath(base)
-          watch(resolvedBase, { recursive: true }, (event, filename) => {
-            if (event !== "rename" || typeof filename !== "string") return
-            const parts = filename.split(/[\\/]/)
-            if (parts.length < 2) return
-            if (excluded.has(parts[0])) return
-            if (!isValidSkillName(parts[0])) return
-            if (!filename.endsWith("SKILL.md")) return
-
-            const fullPath = join(resolvedBase, filename)
-            const disabledPath = fullPath + ".disabled"
-            rename(fullPath, disabledPath).catch(() => {})
-          })
-        } catch { /* dir doesn't exist */ }
-      }
-    }
+    checkForUpdate(client.tui)
   })()
 
   return {
     tool: {
+      /**
+       * triage — Main skill routing tool.
+       *
+       * Takes a natural language query, discovers available skills, scores
+       * them by relevance, and returns the best match or a list of candidates.
+       *
+       * Response paths:
+       *   - No skills installed → instructions for adding skills
+       *   - No matches → remote search fallback with spell correction hint
+       *   - Single clear winner → skill content with routing metadata
+       *   - Multiple close matches → candidate list for LLM to choose
+       *
+       * Spell correction hints are injected into all response paths when
+       * unmatched query words are detected.
+       *
+       * Optional `toast` arg shows a TUI notification to the user.
+       */
       triage: tool({
-        description:
-          "Discover and route to the right specialized skill. " +
-          "Call this before any non-trivial task. " +
-          "Pass a brief description. Returns the best match or a list of candidates.",
-        args: {
-          query: tool.schema.string().optional().describe(
-            "Brief description of what you need help with, e.g. 'backup my database'"
-          ),
-        },
+         description:
+           "Discover and route to the right specialized skill. " +
+           "ALWAYS call this FIRST before attempting any task — check if a specialized skill exists. " +
+           "If a skill matches, read its content and check if it's scoped to a specific project (look for project names in the description or instructions). " +
+           "If the skill is project-specific and doesn't match the current project, warn the user before proceeding. " +
+           "Follow the skill's instructions when applicable, or proceed with general knowledge if not. " +
+           "Pass a brief description. Returns the best match or a list of candidates.",
+         args: {
+           query: tool.schema.string().optional().describe(
+             "Brief description of what you need help with, e.g. 'backup my database'"
+           ),
+           toast: tool.schema.object({
+             message: tool.schema.string().describe("Toast message to show to user"),
+             variant: tool.schema.enum(["info", "success", "error", "warning"]).optional().default("info").describe("Toast style"),
+           }).optional().describe("Optional: show a toast notification to the user"),
+         },
         async execute(args, context) {
+          // Show optional toast notification
+          if (args.toast) {
+            const validVariants = ["info", "success", "error", "warning"] as const
+            const variant = validVariants.includes(args.toast.variant as typeof validVariants[number])
+              ? (args.toast.variant as typeof validVariants[number])
+              : "info"
+            await client.tui.showToast({
+              body: { message: args.toast.message, variant },
+            })
+          }
+
+          // Detect hook support: tool.definition fires before any tool execution.
+          // If it hasn't fired by now, hooks aren't supported — auto-fallback to file-rename mode.
+          if (!hooksConfirmed && !fallbackTriggered) {
+            fallbackTriggered = true
+            const count = await renameSkills(".md", getExcludedSkills)
+            if (count > 0) {
+              await client.tui.showToast({
+                body: { message: `Hooks not supported — ${count} skill(s) hidden via file-rename mode`, variant: "warning" },
+              })
+            }
+          }
+
+          if (!checkTriageRateLimit()) {
+            return "Triage rate limit exceeded (20 calls/60s). Please wait before retrying."
+          }
+
+          const query = (args.query ?? "").trim()
+          if (!query) {
+            return "Describe what you need -- triage will find the best matching skill."
+          }
+
+          if (context.abort.aborted) {
+            return "Triage cancelled."
+          }
+
           const skills = await getCachedSkills()
+
+          // Spell correction: detect unmatched words and suggest fixes
+          const corrections = suggestCorrections(query, skills)
+          const hint = corrections.length > 0
+            ? `Hint: Unmatched words corrected: ${corrections.join(", ")}`
+            : ""
 
           if (skills.length === 0) {
             return [
@@ -272,15 +310,6 @@ export const server: Plugin = async ({ worktree, client }, options) => {
             ].join("\n")
           }
 
-          const query = (args.query ?? "").trim()
-          if (!query) {
-            return "Describe what you need -- triage will find the best matching skill."
-          }
-
-          if (context.abort.aborted) {
-            return "Triage cancelled."
-          }
-
           const scored = scoreSkills(query, skills)
             .filter(s => s.score > 0)
             .sort((a, b) => b.score - a.score)
@@ -289,19 +318,22 @@ export const server: Plugin = async ({ worktree, client }, options) => {
             const findSkills = skills.find(s => s.name.toLowerCase() === "find-skills")
             if (findSkills) {
               const content = await readSkillContent(findSkills.path)
-              return [
+              const lines = [
                 `SKILL ROUTED: ${findSkills.name}`,
                 `Matched by: remote search fallback`,
-                ``,
-                content,
-              ].join("\n")
+              ]
+              if (hint) lines.push(hint)
+              lines.push("")
+              lines.push(content)
+              return lines.join("\n")
             }
+            const { searchRemoteSkills, searchSuperpowers } = await import("./remote.ts")
             const [skillsSh, superpowers] = await Promise.all([
               searchRemoteSkills(query),
               searchSuperpowers(),
             ])
             const combined = [skillsSh, superpowers].filter(Boolean).join("")
-            return `No skill matches "${query}". Try different keywords.${combined}`
+            return `No skill matches "${query}". Try different keywords.${hint ? "\n\n" + hint : ""}${combined}`
           }
 
           // Confidence gap: top match vs runner-up. Large gap = clear winner
@@ -310,12 +342,14 @@ export const server: Plugin = async ({ worktree, client }, options) => {
           if (gap >= THRESHOLD || scored.length === 1) {
             const match = scored[0]
             const content = await readSkillContent(match.path)
-            return [
+            const lines = [
               `SKILL ROUTED: ${match.name}`,
               `Matched by: ${match.matchedBy}`,
-              ``,
-              content,
-            ].join("\n")
+            ]
+            if (hint) lines.push(hint)
+            lines.push("")
+            lines.push(content)
+            return lines.join("\n")
           }
 
           const top = scored.slice(0, 5)
@@ -326,15 +360,58 @@ export const server: Plugin = async ({ worktree, client }, options) => {
           top.forEach((s, i) => {
             lines.push(`${i + 1}. ${s.name} -- ${s.desc}`)
           })
+          if (hint) {
+            lines.push(``)
+            lines.push(hint)
+          }
           lines.push(``)
           lines.push(`Example: triage({ query: "${top[0].name}" })`)
           return lines.join("\n")
         },
       }),
-      notify,
+    },
+    // ── Skill tool override ──────────────────────────────
+    // Uses tool.definition hook to replace the built-in `skill`
+    // tool's description when triage is ON, hiding the <available_skills>
+    // block and preventing the LLM from calling it directly.
+    "tool.definition": async (input, output) => {
+      const wasHookFired = definitionHookFired
+      definitionHookFired = true
+      hooksConfirmed = true
+      if (input.toolID !== "skill") return
+      const state = await getTriageState()
+      if (state !== "on") return
+      output.description =
+        "This tool is disabled. Use `triage` to discover and load specialized skills."
+      if (!wasHookFired) await remigrateIfHooksDetected()
+    },
+    // ── System prompt cleanup ─────────────────────────────
+    // Strips the <available_skills> XML block from the system prompt
+    // as a belt-and-suspenders measure alongside tool.definition.
+    // Falls back silently if the experimental hook is not available.
+    // Also handles mid-session state changes: if triage toggled ON
+    // after startup, restore .disabled files here.
+    "experimental.chat.system.transform": async (_input, output) => {
+      const state = await getTriageState()
+      if (state !== "on") return
+      if (!migrationCompleted) await remigrateIfHooksDetected()
+      const re = /<available_skills>[\s\S]*?<\/available_skills>/g
+      for (let i = 0; i < output.system.length; i++) {
+        output.system[i] = output.system[i].replace(re, "")
+      }
+    },
+    // ── Skill call interception ───────────────────────────
+    // Safety net: if the LLM ignores the disabled description and
+    // calls the native `skill` tool anyway, redirect by setting the
+    // skill name to a sentinel that forces a clean "not found" error.
+    "tool.execute.before": async (input, output) => {
+      if (input.tool !== "skill") return
+      const state = await getTriageState()
+      if (state !== "on") return
+      output.args = { name: "__TRIAGE_DISABLED__" }
     },
     // ── Notification routing ────────────────────────────
-    // Catches triage results and notify() calls to show TUI toasts.
+    // Catches triage results to show TUI toasts.
     // First-line pattern matching avoids parsing the full result.
     // Body isolation prevents false positives on content issue detection.
     "tool.execute.after": async (input, output) => {
@@ -374,160 +451,6 @@ export const server: Plugin = async ({ worktree, client }, options) => {
           })
         }
       }
-      if (input.tool === "notify") {
-        const args = input.args as { message?: string; variant?: string }
-        if (args.message) {
-          await client.tui.showToast({
-            body: {
-              message: args.message,
-              variant: (args.variant as "info" | "success" | "error" | "warning") ?? "info",
-            },
-          })
-        }
-      }
     },
-  }
-}
-
-// ── Discovery ─────────────────────────────────────────────
-
-/**
- * Discovers all skills from the provided filesystem locations.
- *
- * Resolves symlinks, enumerates subdirectories, reads frontmatter from
- * SKILL.md.disabled (priority) and SKILL.md files, deduplicates by name,
- * and sorts project skills before global ones.
- *
- * Non-ENOENT errors are logged to stderr but do not halt discovery.
- *
- * @param locations - Array of {base, scope} directory pairs to scan
- * @returns Deduplicated, sorted array of discovered skills
- */
-async function discoverAllSkills(
-  locations: { base: string; scope: "project" | "global" }[]
-): Promise<SkillEntry[]> {
-  const skills: SkillEntry[] = []
-  const seen = new Set<string>()
-  const excluded = getExcludedSkills()
-
-  for (const { base, scope } of locations) {
-    try {
-      const resolvedBase = await realpath(base)
-      const entries = await readdir(resolvedBase, { withFileTypes: true })
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue
-        if (entry.isSymbolicLink()) continue
-        if (excluded.has(entry.name)) continue
-        if (!isValidSkillName(entry.name)) continue
-
-        const result = await tryReadSkill(join(resolvedBase, entry.name))
-        if (result && !seen.has(result.name)) {
-          seen.add(result.name)
-          skills.push({ ...result, scope })
-        }
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-        console.error(`[opencode-triage] Error scanning ${base}:`, err)
-      }
-    }
-  }
-
-  skills.sort((a, b) => {
-    if (a.scope !== b.scope) return a.scope === "project" ? -1 : 1
-    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
-  })
-
-  return skills
-}
-
-/**
- * Attempts to read a skill definition from a directory.
- *
- * Checks SKILL.md.disabled first (triage-managed, hidden from system prompt),
- * then SKILL.md (exposed to system prompt). Disabled files take priority so
- * the triage router can still find and load skills even when they are hidden
- * from the agent's context.
- *
- * @param skillDir - Absolute path to a skill subdirectory
- * @returns Parsed skill entry (without scope), or null if neither file exists
- */
-async function tryReadSkill(
-  skillDir: string
-): Promise<Omit<SkillEntry, "scope"> | null> {
-  const filenames = ["SKILL.md.disabled", "SKILL.md"]
-  for (const fn of filenames) {
-    const filePath = join(skillDir, fn)
-    try {
-      const content = await readFile(filePath, "utf-8")
-      const name = extractFrontmatter(content, "name") ?? basename(skillDir)
-      const desc = extractFrontmatter(content, "description") ?? ""
-      return { name, desc, path: filePath }
-    } catch { /* try next filename */ }
-  }
-  return null
-}
-
-/**
- * Reads a skill file, strips YAML frontmatter, returns body content.
- *
- * Enforces a 1MB size limit to prevent memory exhaustion. Strips UTF-8
- * BOM for Windows compatibility. Returns error strings on failure rather
- * than throwing, so the triage tool always returns a usable string.
- *
- * @param filePath - Absolute path to SKILL.md or SKILL.md.disabled
- * @returns Body content without frontmatter, or an error string
- */
-async function readSkillContent(filePath: string): Promise<string> {
-  try {
-    const content = await readFile(filePath, "utf-8")
-    if (content.length > MAX_SKILL_SIZE) {
-      return `(skill content truncated: exceeds 1MB limit)`
-    }
-    const clean = stripBOM(content)
-    const bodyMatch = clean.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n*([\s\S]*)/)
-    return bodyMatch ? bodyMatch[1].trim() : clean.trim()
-  } catch {
-    return "(skill content unavailable)"
-  }
-}
-
-async function searchRemoteSkills(query: string): Promise<string> {
-  const url = `https://skills.sh/api/v1/skills/search?q=${encodeURIComponent(query)}&limit=5`
-  try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 3000)
-    const res = await fetch(url, { signal: controller.signal })
-    clearTimeout(timer)
-    if (!res.ok) return ""
-    const body = await res.json() as { data?: Array<{ name: string; source: string; installs: number; installUrl: string | null; url: string }> }
-    if (!body.data || body.data.length === 0) return ""
-    const lines = body.data.map(s => {
-      const install = s.installUrl ? `npx skills add ${s.source}` : s.url
-      return `  - ${s.name} (\`${install}\`) ${s.installs.toLocaleString()} installs`
-    })
-    return "\n\nSuggestions from skills.sh:\n" + lines.join("\n")
-  } catch {
-    return ""
-  }
-}
-
-async function searchSuperpowers(): Promise<string> {
-  const url = "https://api.github.com/repos/obra/superpowers/contents"
-  try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 3000)
-    const res = await fetch(url, { signal: controller.signal })
-    clearTimeout(timer)
-    if (!res.ok) return ""
-    const body = await res.json() as Array<{ name: string; type: string; html_url: string }>
-    const dirs = body.filter(e => e.type === "dir")
-    if (dirs.length === 0) return ""
-    const lines = dirs.slice(0, 10).map(d =>
-      `  - ${d.name} (${d.html_url})`
-    )
-    return "\n\nSuperpowers from obra/superpowers:\n" + lines.join("\n")
-  } catch {
-    return ""
   }
 }

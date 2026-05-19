@@ -1,83 +1,16 @@
 /**
- * Pure utility functions for the opencode-triage plugin.
+ * Shared utility functions for the opencode-triage plugin.
  *
- * This module has zero external dependencies — it only uses built-in
- * JavaScript/TypeScript features. This makes it fully testable in isolation
- * with Node's built-in test runner (`node --test`).
+ * This module contains core string manipulation and security utilities
+ * used across multiple modules. It has zero external dependencies — it
+ * only uses built-in JavaScript/TypeScript features.
  *
  * Key responsibilities:
  *   - Parse YAML frontmatter from SKILL.md files
- *   - Score skills against user queries using keyword matching
- *   - Validate skill directory names (security)
+ *   - Escape regex metacharacters for safe pattern building
+ *   - Validate skill directory names (path traversal defense)
+ *   - Sanitize skill content for safe LLM injection
  */
-
-// ── Configuration constants ────────────────────────────────
-
-/**
- * Minimum score gap required between the top two matches for auto-routing.
- * If the gap is below this threshold, the LLM gets a list of candidates
- * to choose from instead of a single skill.
- *
- * Scoring: exact word match = 15pts, substring match = 10pts.
- * Name matches are weighted 3x, description matches 1x.
- * So a single exact name match (15 * 3 = 45) exceeds this threshold alone.
- */
-export const THRESHOLD = 30
-
-/**
- * Minimum word length to consider during query tokenization.
- * Filters out common short words like "a", "an", "to", "do" that
- * would create false positive matches across many skills.
- */
-export const MIN_WORD_LENGTH = 3
-
-/**
- * Multiplier applied to score bonuses from skill name matches.
- * Names are more specific than descriptions, so they get higher weight.
- * A name match contributes 3x more to the final score than a description match.
- */
-export const NAME_WEIGHT = 3
-
-/**
- * Multiplier applied to score bonuses from skill description matches.
- * Descriptions are broader and less specific, so they get baseline weight.
- */
-export const DESC_WEIGHT = 1
-
-/**
- * Maximum allowed size for a skill file in bytes (1MB).
- * Prevents memory exhaustion attacks where a maliciously large SKILL.md
- * would be loaded into the LLM context window.
- */
-export const MAX_SKILL_SIZE = 1024 * 1024 // 1MB
-
-// ── Type definitions ───────────────────────────────────────
-
-/**
- * Represents a discovered skill from the filesystem.
- * Populated during the discovery phase before any scoring occurs.
- */
-export interface SkillEntry {
-  /** Skill name from frontmatter, or directory name as fallback */
-  name: string
-  /** Skill description from frontmatter, or empty string if missing */
-  desc: string
-  /** Absolute path to the SKILL.md or SKILL.md.disabled file */
-  path: string
-  /** Whether this skill was found in a project-level or global directory */
-  scope: "project" | "global"
-}
-
-/**
- * A skill entry enriched with its relevance score for a specific query.
- * Returned by scoreSkills() and used to rank candidates.
- */
-export interface ScoredSkill extends SkillEntry {
-  /** Computed relevance score based on keyword matching */
-  score: number
-  /** Human-readable list of which words matched and where (e.g. "name:backup, desc:database") */
-  matchedBy: string
-}
 
 // ── String utilities ───────────────────────────────────────
 
@@ -150,77 +83,6 @@ export function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")
 }
 
-// ── Scoring engine ─────────────────────────────────────────
-
-/**
- * Calculates a relevance bonus for a single query word against a target string.
- *
- * Scoring tiers:
- *   - 15 points: Exact word-boundary match (e.g. "db" matches "backup db restore")
- *   - 10 points: Substring match (e.g. "back" matches "backup")
- *   - 0 points: No match at all
- *
- * Word-boundary matches score higher because they indicate a more precise
- * semantic match. Substring matches catch related terms but are less specific.
- *
- * @param word - A single tokenized query word (already lowercased, punctuation stripped)
- * @param target - The skill name or description to match against (already lowercased)
- * @returns Score bonus: 15, 10, or 0
- */
-export function getWordBonus(word: string, target: string): number {
-  const re = new RegExp(`\\b${escapeRegex(word)}\\b`, "i")
-  if (re.test(target)) return 15
-  if (target.includes(word)) return 10
-  return 0
-}
-
-/**
- * Scores all skills against a user query using keyword matching.
- *
- * The scoring pipeline:
- *   1. Tokenize query: split on whitespace, strip punctuation, filter short words
- *   2. For each skill, check each query word against the name (3x weight)
- *   3. Then check each query word against the description (1x weight)
- *   4. Return all skills with their computed scores and match details
- *
- * Note: This returns ALL skills, including those with score 0.
- * The caller should filter with `.filter(s => s.score > 0)` to get only matches.
- *
- * @param query - The user's natural language query (e.g. "backup my database")
- * @param skills - Array of discovered skills to score against
- * @returns All skills with computed scores (filter for score > 0 to get matches)
- */
-export function scoreSkills(query: string, skills: SkillEntry[]): ScoredSkill[] {
-  // Tokenize: lowercase → split on whitespace → strip non-alphanumeric chars → filter short words
-  // Unicode letter/number classes (\p{L}\p{N}) support international queries
-  const words = query.toLowerCase()
-    .split(/\s+/)
-    .map(w => w.replace(/[^\p{L}\p{N}]/gu, ""))
-    .filter(w => w.length >= MIN_WORD_LENGTH)
-
-  if (words.length === 0) return []
-
-  return skills.map(skill => {
-    const nameLower = skill.name.toLowerCase()
-    const descLower = skill.desc.toLowerCase()
-    let score = 0
-    const matched: string[] = []
-
-    // Score name matches first (higher weight)
-    for (const word of words) {
-      const bonus = getWordBonus(word, nameLower)
-      if (bonus > 0) { score += NAME_WEIGHT * bonus; matched.push(`name:${word}`) }
-    }
-    // Then score description matches (lower weight)
-    for (const word of words) {
-      const bonus = getWordBonus(word, descLower)
-      if (bonus > 0) { score += DESC_WEIGHT * bonus; matched.push(`desc:${word}`) }
-    }
-
-    return { ...skill, score, matchedBy: matched.join(", ") }
-  })
-}
-
 // ── Security ───────────────────────────────────────────────
 
 /**
@@ -239,4 +101,32 @@ export function scoreSkills(query: string, skills: SkillEntry[]): ScoredSkill[] 
  */
 export function isValidSkillName(name: string): boolean {
   return name !== ".." && name !== "." && !name.includes("/") && !name.includes("\\")
+}
+
+/**
+ * Sanitizes skill content before injecting into LLM context.
+ *
+ * Strips dangerous HTML patterns that could be used for prompt injection
+ * or XSS-like attacks when the content is rendered in the LLM context:
+ *   - <script>, <iframe>, <object>, <embed>, <form> tags
+ *   - javascript: URIs
+ *   - event handler attributes (onclick, onerror, etc.)
+ *   - <meta> refresh tags
+ *
+ * This is defense-in-depth: skill files are local text, but malicious
+ * content could still attempt to manipulate the LLM via HTML injection.
+ *
+ * @param content - Raw skill file content
+ * @returns Sanitized content with dangerous patterns stripped
+ */
+export function sanitizeSkillContent(content: string): string {
+  return content
+    .replace(/<script[\s\S]*?<\/script>/gi, "[script removed]")
+    .replace(/<iframe[\s\S]*?<\/iframe>/gi, "[iframe removed]")
+    .replace(/<object[\s\S]*?<\/object>/gi, "[object removed]")
+    .replace(/<embed[\s\S]*?<\/embed>/gi, "[embed removed]")
+    .replace(/<form[\s\S]*?<\/form>/gi, "[form removed]")
+    .replace(/<meta\s+http-equiv=["']?refresh["']?[^>]*>/gi, "[meta refresh removed]")
+    .replace(/\bon\w+\s*=\s*["'][^"']*["']/gi, "[event handler removed]")
+    .replace(/javascript\s*:/gi, "[javascript uri removed]")
 }

@@ -8,7 +8,7 @@ import { execSync } from "node:child_process"
 import path from "node:path"
 
 // Re-implement for testing
-function levenshtein(a, b) {
+function levenshtein(a: string, b: string): number {
   const m = a.length, n = b.length
   const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0))
   for (let i = 0; i <= m; i++) dp[i][0] = i
@@ -25,7 +25,7 @@ function levenshtein(a, b) {
   return dp[m][n]
 }
 
-function suggestCommand(input) {
+function suggestCommand(input: string): string | null {
   const commands = ["on", "off", "enable", "disable", "status", "compare", "version", "help"]
   let best = null, bestDist = Infinity
   for (const cmd of commands) {

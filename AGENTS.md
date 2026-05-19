@@ -21,8 +21,13 @@ No test runner, no linter, no formatter config. No tsconfig.json in repo.
 ## Architecture
 
 - Scans 6 directories: `.agent/skills/`, `.claude/skills/`, `.opencode/skills/` (project) + `~/.agents/skills/`, `~/.claude/skills/`, `~/.config/opencode/skills/` (global)
-- Matches both `SKILL.md` (active) and `SKILL.md.disabled` (hidden from prompt)
-- Keyword scoring: `THRESHOLD=30`, `MIN_WORD_LENGTH=3`, `NAME_WEIGHT=3`, `DESC_WEIGHT=1`
+- Reads `SKILL.md` files directly — `.disabled` suffix is fallback for older OpenCode
+- Hides skills from LLM via 3-layer hook defense: `tool.definition` (modifies `skill` tool description) → `experimental.chat.system.transform` (strips `<available_skills>` from system prompt) → `tool.execute.before` (intercepts stray calls)
+- CLI file rename (`SKILL.md` ↔ `SKILL.md.disabled`) remains as fallback when hooks unsupported
+- Upgrade from older versions: plugin detects `.disabled` files left from old file-rename mode, auto-restores them to `SKILL.md` on first chat message
+- Keyword scoring: `THRESHOLD=30`, `MIN_WORD_LENGTH=3`, `NAME_WEIGHT=3`, `DESC_WEIGHT=1`, `BIGRAM_BONUS=10`, `PHRASE_BONUS=50`, `POSITION_DECAY=0.9`, `SCOPE_BONUS=5`
+- Stemming: `stem()` strips `ies→y` and `ing→""` (MIN stem length 4) — bridges morphological variants in desc matching
+- Name tokenization: hyphens/underscores replaced with spaces for bigram/phrase matching in skill names
 - "triage" directory is always excluded
 - Frontmatter keys parsed: `name` (falls back to directory name), `description` (supports folded `>` syntax)
 

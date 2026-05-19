@@ -21,6 +21,7 @@ const fs = require("fs")
 const path = require("path")
 const os = require("os")
 const https = require("https")
+const readline = require("readline")
 
 const PLUGIN_NAME = "opencode-triage"
 const CMD = process.argv[2] || "help"
@@ -308,119 +309,53 @@ function collectConfigState() {
   return { localActive: local.active, globalActive: global.active, localMode: local.mode, globalMode: global.mode }
 }
 
-// ── toggle ────────────────────────────────────────────────
+// ── File rename for skill files ───────────────────────────
 
-function toggle(enable, scope) {
-  const fromExt = enable ? ".md" : ".md.disabled"
-  const toExt = enable ? ".md.disabled" : ".md"
-  let renamedProject = 0
-  let renamedGlobal = 0
-  const changes = []
-
-  for (const { base, label, scope: dirScope } of SKILL_DIRS) {
-    const isGlobalDir = label.startsWith("~")
-    if (scope !== "both") {
-      if (scope === "local") { if (isGlobalDir) continue }
-      if (scope === "global") { if (!isGlobalDir) continue }
-    }
+function renameSkillFiles(fromExt, toExt) {
+  let count = 0
+  for (const { base } of SKILL_DIRS) {
     if (!fs.existsSync(base)) continue
     const dirs = fs.readdirSync(base, { withFileTypes: true })
     for (const d of dirs) {
-      if (!d.isDirectory()) continue
-      if (d.isSymbolicLink()) continue
+      if (!d.isDirectory() || d.isSymbolicLink()) continue
       if (d.name === "triage") continue
-      if (d.name.includes(path.sep) || d.name === ".." || d.name === ".") continue
-      const src = path.join(base, d.name, `SKILL${fromExt}`)
-      const dst = path.join(base, d.name, `SKILL${toExt}`)
-      if (fs.existsSync(src)) {
+      const src = path.join(base, d.name, "SKILL" + fromExt)
+      const dst = path.join(base, d.name, "SKILL" + toExt)
+      if (fs.existsSync(src) && !fs.existsSync(dst)) {
         if (!isDryRun) safeRenameSync(src, dst)
-        changes.push({ name: sanitizeName(d.name), from: `SKILL${fromExt}`, to: `SKILL${toExt}` })
-        if (label.startsWith("~")) renamedGlobal++
-        else renamedProject++
+        count++
       }
     }
   }
+  return count
+}
 
-  // Cleanup both-file conflicts when enabling
-  if (enable) {
-    for (const { base, label } of SKILL_DIRS) {
-      const isGlobalDir = label.startsWith("~")
-      if (scope !== "both") {
-        if (scope === "local") { if (isGlobalDir) continue }
-        if (scope === "global") { if (!isGlobalDir) continue }
-      }
-      if (!fs.existsSync(base)) continue
-      const dirs = fs.readdirSync(base, { withFileTypes: true })
-      for (const d of dirs) {
-        if (!d.isDirectory()) continue
-        if (d.isSymbolicLink()) continue
-        if (d.name === "triage") continue
-        if (d.name.includes(path.sep) || d.name === ".." || d.name === ".") continue
-        const activePath = path.join(base, d.name, "SKILL.md")
-        const disabledPath = path.join(base, d.name, "SKILL.md.disabled")
-        if (fs.existsSync(activePath) && fs.existsSync(disabledPath)) {
-          if (!isDryRun) fs.unlinkSync(activePath)
-          changes.push({ name: sanitizeName(d.name), from: "SKILL.md (duplicate)", to: "removed" })
-          if (label.startsWith("~")) renamedGlobal++
-          else renamedProject++
-        }
-      }
-    }
-  }
+// ── toggle ────────────────────────────────────────────────
 
-  const totalRenamed = renamedProject + renamedGlobal
-
-  if (isDryRun) {
-    const scopeLabel = scope === "both" ? " (both scopes)" : ` (${scope} scope)`
-    console.log()
-    console.log(BOLD + "Triage " + (enable ? "ON" : "OFF") + scopeLabel + RESET + DIM + " — dry run" + RESET)
-    console.log()
-    if (changes.length > 0) {
-      console.log("  Would rename:")
-      changes.slice(0, 20).forEach(c => {
-        console.log(`    ${c.name.padEnd(35)} ${c.from} → ${c.to}`)
-      })
-      if (changes.length > 20) console.log(`    ... and ${changes.length - 20} more`)
-      console.log()
-      console.log(`  ${changes.length} file(s) would be renamed. No changes made.`)
-    } else {
-      console.log(`  No changes needed — all skills already ${enable ? "hidden" : "exposed"}.`)
-    }
-    console.log()
-    return
-  }
-
-  // Persist ON/OFF state: write autoHide: true/false to config so next session respects the choice
+function toggle(enable, scope) {
   const scopes = scope === "both" ? ["global", "local"] : [scope]
   for (const s of scopes) {
     const cfgPath = s === "global" ? GLOBAL_CFG_PATH : LOCAL_CFG_PATH
     writeTriageState(cfgPath, enable)
   }
 
-  const scopeLabel = scope === "both" ? " (both scopes)" : scope ? ` (${scope} scope)` : ""
+  // Restore .disabled files back to .md — hooks handle hiding at LLM level.
+  // Run on both on and off: stale .disabled from old versions should be cleaned up.
+  const renamed = renameSkillFiles(".md.disabled", ".md")
+  if (renamed > 0 && !isQuiet) {
+    console.log(`  ${renamed} skill(s) restored from .disabled to SKILL.md`)
+  }
+
+  const scopeLabel = scope === "both" ? "" : ` — ${scope} scope`
   console.log()
   console.log(BOLD + "Triage " + (enable ? "ON" : "OFF") + scopeLabel + RESET)
-
-  if (totalRenamed > 0) {
-    console.log()
-    changes.slice(0, 15).forEach(c => {
-      console.log(`  ${c.name.padEnd(35)} ${c.from} → ${c.to}`)
-    })
-    if (changes.length > 15) console.log(`  ... and ${changes.length - 15} more`)
-    console.log()
-    console.log(`Skills ${enable ? "hidden" : "exposed"}: ${totalRenamed} file(s) renamed`)
-    if (renamedProject) console.log(`  Project: ${renamedProject}`)
-    if (renamedGlobal) console.log(`  Global:  ${renamedGlobal}`)
+  console.log()
+  if (enable) {
+    console.log(DIM + "  Hooks hide skills from LLM. SKILL.md files stay intact — other AI tools still see them." + RESET)
   } else {
-    console.log()
-    console.log(`  No changes — all skills already ${enable ? "hidden" : "exposed"}.`)
+    console.log(DIM + "  All skills exposed to LLM again." + RESET)
   }
-
-  // Restart only needed when skill files changed (plugin reloads cache every 5s, but startup watcher needs restart)
-  if (totalRenamed > 0) {
-    console.log()
-    console.log(YELLOW + "Restart opencode for changes to take effect." + RESET)
-  }
+  console.log(`  ${YELLOW}Restart opencode for changes to take effect.${RESET}`)
   console.log()
 }
 
@@ -586,70 +521,108 @@ function dedupeSkills() {
     return
   }
 
-  // Find project-level skills that are duplicates of a global skill
-  const toRemove = skills.filter(s => s.scope === "project" && dupNames.has(s.name))
+  // Group duplicates by name
+  const dupGroups = {}
+  for (const s of skills) {
+    if (dupNames.has(s.name)) {
+      if (!dupGroups[s.name]) dupGroups[s.name] = { project: null, global: null }
+      dupGroups[s.name][s.scope] = s
+    }
+  }
 
-  if (toRemove.length === 0) {
+  if (isDryRun) {
     console.log()
-    console.log("No project-level duplicates found to remove.")
+    console.log(BOLD + "Deduplicating skills (dry run)" + RESET)
+    console.log()
+    for (const [name, group] of Object.entries(dupGroups)) {
+      console.log(`  ${name.padEnd(30)} local: ${group.project ? group.project.label : "none"} | global: ${group.global ? group.global.label : "none"}`)
+    }
+    console.log()
+    console.log(`  ${Object.keys(dupGroups).length} duplicate group(s) found. No changes made.`)
     console.log()
     return
   }
 
-  console.log()
-  console.log(BOLD + "Deduplicating skills" + RESET + DIM + " (removing project duplicates — global copies kept)" + RESET)
-  console.log()
+  // Interactive mode: ask user which scope to delete for each duplicate
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
 
-  let removed = 0
-  let errors = 0
-
-  for (const skill of toRemove) {
-    const files = []
-    const disabledPath = path.join(skill.dirPath, "SKILL.md.disabled")
-    const activePath = path.join(skill.dirPath, "SKILL.md")
-
-    if (fs.existsSync(disabledPath)) files.push(disabledPath)
-    if (fs.existsSync(activePath)) files.push(activePath)
-
-    if (files.length === 0) {
-      console.log(`  ${DIM}${skill.name.padEnd(30)} no skill files found${RESET}`)
-      continue
-    }
-
-    if (isDryRun) {
-      console.log(`  ${YELLOW}[would remove]${RESET}  ${skill.name.padEnd(30)} ${skill.label}(${files.map(f => path.basename(f)).join(", ")})`)
-      removed++
-      continue
-    }
-
-    let ok = true
-    for (const f of files) {
-      try {
-        fs.unlinkSync(f)
-      } catch (err) {
-        console.error(`  ${RED}[error]${RESET}  ${skill.name} — could not delete ${path.basename(f)}: ${err.message}`)
-        ok = false
-        errors++
-      }
-    }
-    if (ok) {
-      console.log(`  ${GREEN}[removed]${RESET}  ${skill.name.padEnd(30)} ${skill.label}`)
-      removed++
-    }
+  function ask(question) {
+    return new Promise(resolve => rl.question(question, resolve))
   }
 
-  console.log()
-  if (isDryRun) {
-    console.log(`  ${removed} file(s) would be removed. No changes made. (use without --dry-run to apply)`)
-  } else {
+  async function run() {
+    console.log()
+    console.log(BOLD + "Deduplicating skills" + RESET)
+    console.log()
+
+    let removed = 0
+    let errors = 0
+
+    for (const [name, group] of Object.entries(dupGroups)) {
+      const hasLocal = !!group.project
+      const hasGlobal = !!group.global
+
+      if (!hasLocal || !hasGlobal) continue
+
+      console.log(`  ${BOLD}${name}${RESET}`)
+      console.log(`    Local:  ${group.project.label} (${group.project.dirPath})`)
+      console.log(`    Global: ${group.global.label} (${group.global.dirPath})`)
+      console.log()
+
+      const answer = await ask(`  Delete [l]ocal or [g]lobal copy? (l/g): `)
+      const choice = answer.trim().toLowerCase()
+
+      let toDelete = null
+      if (choice === "l") {
+        toDelete = group.project
+        console.log(`  ${YELLOW}Deleting local copy...${RESET}`)
+      } else if (choice === "g") {
+        toDelete = group.global
+        console.log(`  ${YELLOW}Deleting global copy...${RESET}`)
+      } else {
+        console.log(`  ${DIM}Skipped — invalid choice${RESET}`)
+        continue
+      }
+
+      const files = []
+      const disabledPath = path.join(toDelete.dirPath, "SKILL.md.disabled")
+      const activePath = path.join(toDelete.dirPath, "SKILL.md")
+      if (fs.existsSync(disabledPath)) files.push(disabledPath)
+      if (fs.existsSync(activePath)) files.push(activePath)
+
+      if (files.length === 0) {
+        console.log(`  ${DIM}No skill files found — skipping${RESET}`)
+        continue
+      }
+
+      let ok = true
+      for (const f of files) {
+        try {
+          fs.unlinkSync(f)
+        } catch (err) {
+          console.error(`  ${RED}[error]${RESET} could not delete ${path.basename(f)}: ${err.message}`)
+          ok = false
+          errors++
+        }
+      }
+      if (ok) {
+        console.log(`  ${GREEN}[removed]${RESET} ${toDelete.label} copy deleted`)
+        removed++
+      }
+      console.log()
+    }
+
+    rl.close()
+
     console.log(`  ${removed} duplicate(s) removed. ${errors > 0 ? errors + " error(s). " : ""}`)
     if (removed > 0) {
       console.log()
-      console.log(YELLOW + "  Skills removed from project scope only — global copies remain intact." + RESET)
       console.log(YELLOW + "  Restart opencode for changes to take effect." + RESET)
     }
+    console.log()
   }
-  console.log()
+
+  run()
 }
 
 // ── status ────────────────────────────────────────────────
@@ -714,28 +687,70 @@ function showStatus() {
     "Pass a brief description. Returns the best match or a list of candidates." +
     "Brief description of what you need help with, e.g. 'backup my database'"
   const toolDefTokens = estimateTokens(TOOL_DEF_TEXT)
-  // hiddenTokens already holds native XML tokens (name+desc only) from calcHiddenSkillTokens()
   const netSavings = hiddenTokens - toolDefTokens
 
-  // ON/OFF derived from skill file state (hidden/exposed), not plugin config
-  const projState = projSkills.length === 0 ? "none"
-    : projHidden > 0 && projExposed === 0 ? "on"
-    : projHidden === 0 ? "off"
-    : "mixed"
-  const gloState = gloSkills.length === 0 ? "none"
-    : gloHidden > 0 && gloExposed === 0 ? "on"
-    : gloHidden === 0 ? "off"
-    : "mixed"
+  // Effective state: hooks first, file rename as fallback indicator
+  // "on"  = hooks active OR all files renamed
+  // "off" = hooks off AND no files renamed
+  function effectiveState(scope) {
+    const active = scope === "project" ? localActive : globalActive
+    const mode = scope === "project" ? localMode : globalMode
+    const skillsArr = scope === "project" ? projSkills : gloSkills
+    const hidden = skillsArr.filter(s => s.state === "hidden").length
+    const exposed = skillsArr.filter(s => s.state === "exposed").length
+    if (skillsArr.length === 0) return "none"
+    if (mode === "auto") return "on"                 // hooks primary
+    if (hidden > 0 && exposed === 0) return "on"     // file rename fallback
+    if (hidden === 0) return "off"
+    return "mixed"
+  }
+
+  const projState = effectiveState("project")
+  const gloState = effectiveState("global")
 
   function stateColor(state) { return state === "on" ? GREEN : YELLOW }
   function stateText(state) {
     return state === "on" ? "ON" : state === "off" ? "OFF" : state === "mixed" ? "MIXED" : "—"
   }
 
-  // Mixed-state warning: some skills hidden, some exposed in same scope
+  // Defense mechanism description per scope
+  function defenseDesc(scope) {
+    const active = scope === "project" ? localActive : globalActive
+    const mode = scope === "project" ? localMode : globalMode
+    const skillsArr = scope === "project" ? projSkills : gloSkills
+    const hidden = skillsArr.filter(s => s.state === "hidden").length
+    const exposed = skillsArr.filter(s => s.state === "exposed").length
+
+    if (mode === "auto") {
+      const parts = [GREEN + "hooks" + RESET]
+      if (hidden > 0) parts.push(`${hidden} file-hidden`)
+      if (exposed > 0) parts.push(GREEN + `${exposed} exposed (hooks)` + RESET)
+      return parts.join(" · ")
+    }
+    if (active && mode === "manual") {
+      const parts = [YELLOW + "hooks off (manual)" + RESET]
+      if (hidden > 0) parts.push(GREEN + `${hidden} file-hidden` + RESET)
+      if (exposed > 0) parts.push(`${exposed} exposed`)
+      return parts.join(" · ")
+    }
+    // Not active in config
+    if (hidden > 0) return GREEN + `${hidden} file-hidden` + RESET + " (no hooks)"
+    return exposed + " exposed (no hooks)"
+  }
+
+  // Out-of-sync warnings
   const outOfSync = []
-  if (projState === "mixed") outOfSync.push(`${projExposed} project skill(s) exposed · ${projHidden} hidden — run /triage on or /triage off to sync`)
-  if (gloState === "mixed") outOfSync.push(`${gloExposed} global skill(s) exposed · ${gloHidden} hidden — run /triage on or /triage off to sync`)
+  if (projState === "mixed") outOfSync.push(`${projExposed} project skills exposed · ${projHidden} hidden — run /triage on or /triage off`)
+  if (gloState === "mixed") outOfSync.push(`${gloExposed} global skills exposed · ${gloHidden} hidden — run /triage on or /triage off`)
+
+  // Hooks-vs-files info (human output only, not in JSON)
+  const hookNotes = []
+  if (localMode === "auto" && projHidden < projExposed && projExposed > 0) {
+    hookNotes.push(`project hooks ON · ${projExposed} skills still SKILL.md (not .disabled) — safe, hooks handle it`)
+  }
+  if (globalMode === "auto" && gloHidden < gloExposed && gloExposed > 0) {
+    hookNotes.push(`global hooks ON · ${gloExposed} skills still SKILL.md (not .disabled) — safe, hooks handle it`)
+  }
 
   if (isJson) {
     const json = {
@@ -745,6 +760,7 @@ function showStatus() {
         exposed: projExposed,
         total: projHidden + projExposed,
         command: fs.existsSync(LOCAL_CMD_FILE) ? "found" : "not found",
+        config: { active: localActive, mode: localMode },
       },
       global: {
         state: gloState,
@@ -752,6 +768,7 @@ function showStatus() {
         exposed: gloExposed,
         total: gloHidden + gloExposed,
         command: fs.existsSync(GLOBAL_CMD_FILE) ? "found" : "not found",
+        config: { active: globalActive, mode: globalMode },
       },
       totals: { hidden: totalHidden, exposed: totalExposed, total: totalHidden + totalExposed },
       tokens_saved: netSavings > 0 ? netSavings : 0,
@@ -773,22 +790,42 @@ function showStatus() {
 
   // Project row
   const projLabel = projSkills.length > 0 ? stateColor(projState) + stateText(projState) + RESET : DIM + "—" + RESET
-  console.log(`  Project:  ${projLabel}  │  ${projHidden} hidden · ${projExposed} exposed · ${projHidden + projExposed} total  │  ${fs.existsSync(LOCAL_CMD_FILE) ? GREEN + "command ✓" + RESET : DIM + "command ✗" + RESET}`)
-  const gloLabel  = gloSkills.length  > 0 ? stateColor(gloState)  + stateText(gloState)  + RESET : DIM + "—" + RESET
-  console.log(`  Global:   ${gloLabel}  │  ${gloHidden} hidden · ${gloExposed} exposed · ${gloHidden + gloExposed} total  │  ${fs.existsSync(GLOBAL_CMD_FILE) ? GREEN + "command ✓" + RESET : DIM + "command ✗" + RESET}`)
+  const projDef = defenseDesc("project")
+  const projCmd = fs.existsSync(LOCAL_CMD_FILE) ? GREEN + "✓" + RESET : DIM + "✗" + RESET
+  console.log(`  Project:  ${projLabel}  │  ${projHidden + projExposed} skills  │  ${projDef}  │  ${projCmd}`)
+
+  const gloLabel = gloSkills.length > 0 ? stateColor(gloState) + stateText(gloState) + RESET : DIM + "—" + RESET
+  const gloDef = defenseDesc("global")
+  const gloCmd = fs.existsSync(GLOBAL_CMD_FILE) ? GREEN + "✓" + RESET : DIM + "✗" + RESET
+  console.log(`  Global:   ${gloLabel}  │  ${gloHidden + gloExposed} skills  │  ${gloDef}  │  ${gloCmd}`)
   console.log()
 
-  // Out-of-sync warning
+  // Warnings
   if (outOfSync.length > 0) {
-    console.log(`  ${YELLOW}⚠ ${outOfSync.join("; ")} — run /triage on to hide them${RESET}`)
+    console.log(`  ${YELLOW}⚠ ${outOfSync.join(" ")}${RESET}`)
     console.log()
+  }
+  if (hookNotes.length > 0) {
+    console.log(`  ${DIM}ℹ ${hookNotes.join("\n  ℹ ")}${RESET}`)
+    console.log()
+  }
+
+  // Badge color: exposed = GREEN when hooks handle hiding, YELLOW when actually exposed
+  function skillBadge(skill, scope) {
+    const mode = scope === "project" ? localMode : globalMode
+    const active = scope === "project" ? localActive : globalActive
+    if (skill.state === "hidden") return GREEN + "[hidden]" + RESET
+    // Exposed: green if hooks active (files are SKILL.md but hidden at LLM level)
+    if (mode === "auto") return GREEN + "[exposed]" + RESET + DIM + " (hooks)" + RESET
+    // Exposed: yellow if hooks off or manual (actually visible to LLM)
+    return YELLOW + "[exposed]" + RESET
   }
 
   // Grouped skill lists
   if (projSkills.length > 0) {
     console.log(`  ${DIM}── Project skills ──────────────────────────────────────${RESET}`)
     projSkills.forEach(s => {
-      const badge = s.state === "hidden" ? GREEN + "[hidden]" + RESET : YELLOW + "[exposed]" + RESET
+      const badge = skillBadge(s, "project")
       const dupTag = dupNames.has(s.name) ? YELLOW + "[dup]" + RESET : ""
       const pad = 30 - (dupTag ? 5 : 0)
       console.log(`  ${badge}  ${s.name.padEnd(pad)} ${dupTag} ${s.label}`)
@@ -800,7 +837,7 @@ function showStatus() {
     const maxShow = showAll ? gloSkills.length : 10
     console.log(`  ${DIM}── Global skills ───────────────────────────────────────${RESET}`)
     gloSkills.slice(0, maxShow).forEach(s => {
-      const badge = s.state === "hidden" ? GREEN + "[hidden]" + RESET : YELLOW + "[exposed]" + RESET
+      const badge = skillBadge(s, "global")
       const dupTag = dupNames.has(s.name) ? YELLOW + "[dup]" + RESET : ""
       const pad = 30 - (dupTag ? 5 : 0)
       console.log(`  ${badge}  ${s.name.padEnd(pad)} ${dupTag} ${s.label}`)
@@ -816,7 +853,14 @@ function showStatus() {
   if (dupCount > 0) {
     console.log(`  ${YELLOW}${dupCount} duplicate(s) found — run /triage dedupe to remove project-level dupes${RESET}`)
   }
-  console.log(`  ${DIM}~${savedLabel} tokens saved from prompt${RESET}`)
+
+  const triageActive = projState === "on" || gloState === "on"
+  if (triageActive && netSavings > 0) {
+    console.log(`  ${DIM}~${savedLabel} tokens saved from prompt${RESET}`)
+  } else {
+    const potentialLabel = hiddenTokens.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")
+    console.log(`  ${DIM}Triage off — ~${potentialLabel} tokens could be saved${RESET}`)
+  }
 
   if (skills.length === 0) {
     console.log()
@@ -963,7 +1007,11 @@ function showCompare() {
   console.log()
   console.log(BOLD + "Cost Comparison Global + Local" + RESET)
   console.log()
-  console.log(`Skills: ${hiddenEntries.length} hidden · ${exposedEntries.length} exposed · ${total} total`)
+  console.log(`Skills: ${hiddenEntries.length} hidden (file) · ${exposedEntries.length} exposed (file) · ${total} total`)
+  const config = collectConfigState()
+  if (config.globalMode === "auto" || config.localMode === "auto") {
+    console.log(`  ${DIM}ℹ hooks active — skills visible above are hidden at LLM level via tool.definition hook${RESET}`)
+  }
   console.log()
   console.log(pad("", 24) + pad("WITH triage", 22) + pad("WITHOUT (native)", 22))
   console.log(pad("──────────────────", 24) + pad("────────────────────", 22) + pad("────────────────────", 22))
@@ -1038,35 +1086,39 @@ function showHelp() {
     console.log(JSON.stringify({
       version: CURRENT_VERSION,
       commands: ["on", "off", "status", "dedupe", "compare", "version", "help"],
-      flags: ["--local", "--global", "--both", "--json", "--quiet", "--dry-run", "--all"],
+      flags: ["--local", "--global", "--both", "--json", "--quiet", "--all"],
     }, null, 2))
     return
   }
+  const cmdCol = 10
+  const flagCol = 12
+  const cmd = (name, desc) => "  " + BOLD + name + RESET + " ".repeat(cmdCol - name.length) + desc
+  const flag = (name, desc) => "  " + BOLD + name + RESET + " ".repeat(flagCol - name.length) + desc
   console.log()
   console.log(BOLD + "opencode-triage v" + CURRENT_VERSION + RESET + " — Deterministic Skill Router")
   console.log()
-  console.log("  " + BOLD + "on" + RESET + "       Hide all skills from the AI prompt   (restart after)")
-  console.log("  " + BOLD + "off" + RESET + "      Expose all skills to the AI prompt    (restart after)")
-  console.log("  " + BOLD + "status" + RESET + "   Show current state and skill counts")
-  console.log("  " + BOLD + "dedupe" + RESET + "  Remove project-level duplicate skills")
-  console.log("  " + BOLD + "compare" + RESET + "  Token/time cost comparison")
-  console.log("  " + BOLD + "version" + RESET + "  Show version and check for updates")
-  console.log("  " + BOLD + "help" + RESET + "     Show this help")
+  console.log(cmd("on", "Hide skills from OpenCode LLM via hooks (no file rename)"))
+  console.log(cmd("off", "Expose all skills to the LLM again"))
+  console.log(cmd("status", "Show current state, skill counts, and token savings"))
+  console.log(cmd("dedupe", "Remove duplicate skills (interactive: choose local or global)"))
+  console.log(cmd("compare", "Token/time cost comparison with vs without triage"))
+  console.log(cmd("version", "Show version and check for updates"))
+  console.log(cmd("help", "Show this help"))
   console.log()
-  console.log(DIM + "  Use /triage off before switching to Cursor or another AI tool." + RESET)
-  console.log(DIM + "  Use /triage on  to return to routed mode." + RESET)
+  console.log(DIM + "  SKILL.md files stay intact — other AI tools can still read them." + RESET)
+  console.log(DIM + "  Hooks handle hiding at the LLM prompt level, no file rename needed." + RESET)
   console.log()
-  console.log(BOLD + "Advanced" + RESET + DIM + "  (override default: both scopes)" + RESET)
+  console.log(BOLD + "Scope" + RESET + DIM + "  (override default: both scopes)" + RESET)
   console.log()
-  console.log("  --local       Target current project only")
-  console.log("  --global      Target global skills only")
-  console.log("  --dry-run     Preview changes without applying (on/off)")
-  console.log("  --json        Output as JSON (all commands)")
-  console.log("  --quiet       Suppress non-error output (on/off)")
-  console.log("  --all         Show full skill list without truncation (status)")
+  console.log(flag("--local", "Target current project only"))
+  console.log(flag("--global", "Target global skills only"))
+  console.log(flag("--json", "Output as JSON (all commands)"))
+  console.log(flag("--quiet", "Suppress non-error output (on/off)"))
+  console.log(flag("--all", "Show full skill list without truncation (status)"))
+  console.log(flag("--dry-run", "Preview changes without applying (dedupe)"))
   console.log()
-  console.log("  " + BOLD + "Uninstall:" + RESET + "  npm uninstall -g opencode-triage")
-  console.log("  " + BOLD + "Docs:" + RESET + "      https://github.com/cascharly/opencode-triage")
+  console.log("  " + BOLD + "Uninstall:" + RESET + " ".repeat(flagCol - "Uninstall:".length) + "npm uninstall -g opencode-triage")
+  console.log("  " + BOLD + "Docs:" + RESET + " ".repeat(flagCol - "Docs:".length) + "https://github.com/cascharly/opencode-triage")
   console.log()
 }
 

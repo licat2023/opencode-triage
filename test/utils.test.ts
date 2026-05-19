@@ -1,17 +1,8 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import {
-  stripBOM,
-  extractFrontmatter,
-  escapeRegex,
-  getWordBonus,
-  scoreSkills,
-  isValidSkillName,
-  THRESHOLD,
-  MIN_WORD_LENGTH,
-  NAME_WEIGHT,
-  DESC_WEIGHT,
-} from "../src/utils.ts"
+import { stripBOM, extractFrontmatter, escapeRegex, isValidSkillName, sanitizeSkillContent } from "../src/utils.ts"
+import { getWordBonus, scoreSkills, stem } from "../src/scoring.ts"
+import { THRESHOLD, MIN_WORD_LENGTH, NAME_WEIGHT, DESC_WEIGHT, SCOPE_BONUS } from "../src/config.ts"
 
 // ── stripBOM ──────────────────────────────────────────────
 
@@ -224,6 +215,46 @@ describe("isValidSkillName", () => {
   })
 })
 
+// ── stem ──────────────────────────────────────────────────
+
+describe("stem", () => {
+  it("ies → y: vulnerabilities → vulnerability", () => {
+    assert.equal(stem("vulnerabilities"), "vulnerability")
+  })
+
+  it("ies → y: activities → activity", () => {
+    assert.equal(stem("activities"), "activity")
+  })
+
+  it("ing → '': refactoring → refactor", () => {
+    assert.equal(stem("refactoring"), "refactor")
+  })
+
+  it("ing → '': testing → test", () => {
+    assert.equal(stem("testing"), "test")
+  })
+
+  it("ing → '': monitoring → monitor", () => {
+    assert.equal(stem("monitoring"), "monitor")
+  })
+
+  it("no rule: react stays react", () => {
+    assert.equal(stem("react"), "react")
+  })
+
+  it("MIN guard: short words not stripped — ring stays ring", () => {
+    assert.equal(stem("ring"), "ring")
+  })
+
+  it("MIN guard: using stays using (result 'us' too short)", () => {
+    assert.equal(stem("using"), "using")
+  })
+
+  it("MIN guard: ties stays ties (result 'ty' too short)", () => {
+    assert.equal(stem("ties"), "ties")
+  })
+})
+
 // ── Constants ─────────────────────────────────────────────
 
 describe("constants", () => {
@@ -241,6 +272,10 @@ describe("constants", () => {
 
   it("DESC_WEIGHT is 1", () => {
     assert.equal(DESC_WEIGHT, 1)
+  })
+
+  it("SCOPE_BONUS is 5", () => {
+    assert.equal(SCOPE_BONUS, 5)
   })
 })
 
@@ -263,14 +298,15 @@ describe("scoring scenarios", () => {
     assert.ok(gap >= THRESHOLD, `Gap ${gap} should be >= ${THRESHOLD}`)
   })
 
-  it("ambiguous query returns multiple close scores", () => {
+  it("IDF resolves ambiguity — rare word dominates common word", () => {
     const scored = scoreSkills("backup database", skills)
       .filter(s => s.score > 0)
       .sort((a, b) => b.score - a.score)
 
     assert.ok(scored.length >= 2)
+    assert.equal(scored[0].name, "backup-restore")
     const gap = scored[0].score - (scored[1]?.score ?? 0)
-    assert.ok(gap < THRESHOLD, `Gap ${gap} should be < ${THRESHOLD} for ambiguous query`)
+    assert.ok(gap >= THRESHOLD, `Gap ${gap} should be >= ${THRESHOLD} — IDF boosted "backup" (rare word)`)
   })
 
   it("single skill returns auto-route", () => {
@@ -279,6 +315,127 @@ describe("scoring scenarios", () => {
       .filter(s => s.score > 0)
 
     assert.equal(scored.length, 1)
+  })
+
+  it("bigram bonus when consecutive words appear in desc", () => {
+    const skills = [
+      { name: "react-patterns", desc: "React composition patterns. Use when building React apps with boolean prop patterns.", path: "/a", scope: "project" as const },
+      { name: "react-perf", desc: "React performance optimization for production apps.", path: "/b", scope: "project" as const },
+    ]
+    const scored = scoreSkills("boolean prop", skills)
+      .filter(s => s.score > 0)
+      .sort((a, b) => b.score - a.score)
+
+    assert.equal(scored.length, 1)
+    assert.equal(scored[0].name, "react-patterns")
+    assert.ok(scored[0].matchedBy.includes("bigram:boolean prop"), "bigram match should be tracked")
+    assert.ok(scored[0].score >= 10, "bigram bonus should increase score")
+  })
+
+  it("phrase bonus for 3+ consecutive words in desc", () => {
+    const skills = [
+      { name: "diagram-creator", desc: "Create architecture diagrams and flowcharts for system design using Mermaid.", path: "/a", scope: "project" as const },
+      { name: "other-tool", desc: "General diagram tool for different purposes.", path: "/b", scope: "project" as const },
+    ]
+    const scored = scoreSkills("create architecture diagrams", skills)
+      .filter(s => s.score > 0)
+      .sort((a, b) => b.score - a.score)
+
+    assert.equal(scored[0].name, "diagram-creator")
+    assert.ok(scored[0].matchedBy.includes("phrase:"), "phrase match should be tracked")
+    assert.ok(scored[0].score >= 50, "phrase bonus should add at least 50 points")
+  })
+
+  it("descScore tracks description-only points", () => {
+    const skills = [
+      { name: "x-skill", desc: "alpha beta gamma delta epsilon zeta eta theta", path: "/x", scope: "project" as const },
+    ]
+    const scored = scoreSkills("alpha beta gamma", skills)
+    assert.ok(scored[0].descScore > 0, "descScore should be > 0 when description matches")
+    assert.ok(scored[0].descScore <= scored[0].score, "descScore should not exceed total score")
+  })
+
+  it("position weighting — first word matters more", () => {
+    const skills = [
+      { name: "backup-restore", desc: "Backup and restore databases", path: "/a", scope: "project" as const },
+      { name: "database-sync", desc: "Synchronize databases across servers", path: "/b", scope: "project" as const },
+    ]
+    // "backup database" — "backup" is first word and appears only in backup-restore name
+    // "database backup" — "database" is first word but appears in both
+    const scored1 = scoreSkills("backup database", skills).filter(s => s.score > 0).sort((a, b) => b.score - a.score)
+    const scored2 = scoreSkills("database backup", skills).filter(s => s.score > 0).sort((a, b) => b.score - a.score)
+    
+    // In both cases, backup-restore should win, but gap should be larger when "backup" is first
+    assert.equal(scored1[0].name, "backup-restore")
+    assert.equal(scored2[0].name, "backup-restore")
+    const gap1 = scored1[0].score - scored1[1].score
+    const gap2 = scored2[0].score - scored2[1].score
+    assert.ok(gap1 > gap2, `gap with "backup" first (${gap1}) should exceed gap with "database" first (${gap2})`)
+  })
+
+  it("stemming — inflected desc word matches uninflected query word", () => {
+    const skills = [
+      { name: "sec-tool", desc: "Detect and report LLM vulnerabilities in production", path: "/a", scope: "project" as const },
+      { name: "sec-monitor", desc: "Security monitoring and alerting service", path: "/b", scope: "project" as const },
+    ]
+    const scored = scoreSkills("vulnerability", skills)
+      .filter(s => s.score > 0)
+      .sort((a, b) => b.score - a.score)
+
+    assert.equal(scored[0].name, "sec-tool", "sec-tool has 'vulnerabilities' → stems to 'vulnerability'")
+    assert.ok(scored[0].matchedBy.includes("desc:stem:vulnerability"), "stem match should be tracked")
+  })
+
+  it("stemming — query word matches gerund in desc", () => {
+    const skills = [
+      { name: "code-tools", desc: "Tools for refactoring legacy codebases", path: "/a", scope: "project" as const },
+      { name: "react-guide", desc: "React component best practices", path: "/b", scope: "project" as const },
+    ]
+    const scored = scoreSkills("refactor", skills)
+      .filter(s => s.score > 0)
+      .sort((a, b) => b.score - a.score)
+
+    assert.equal(scored[0].name, "code-tools")
+    assert.ok(scored[0].matchedBy.includes("desc:stem:refactor"))
+  })
+
+  it("name tokenization — bigram matches across hyphenated name", () => {
+    const skills = [
+      { name: "vercel-react-native-skills", desc: "Mobile framework guide", path: "/a", scope: "global" as const },
+      { name: "vercel-react-best-practices", desc: "Web framework guide", path: "/b", scope: "global" as const },
+    ]
+    const scored = scoreSkills("react native", skills)
+      .filter(s => s.score > 0)
+      .sort((a, b) => b.score - a.score)
+
+    assert.equal(scored[0].name, "vercel-react-native-skills")
+    assert.ok(scored[0].matchedBy.includes("bigram:name:react native"), "name bigram should be tracked")
+    const gap = scored[0].score - scored[1].score
+    assert.ok(gap >= THRESHOLD, `gap ${gap} should exceed THRESHOLD after name bigram bonus`)
+  })
+
+  it("scope tiebreaker — project skill wins exact tie over global", () => {
+    const skills = [
+      { name: "sec-scanner", desc: "security vulnerability scanning tool", path: "/a", scope: "project" as const },
+      { name: "sec-monitor", desc: "security vulnerability monitoring service", path: "/b", scope: "global" as const },
+    ]
+    const scored = scoreSkills("security vulnerability", skills)
+      .filter(s => s.score > 0)
+      .sort((a, b) => b.score - a.score)
+
+    assert.equal(scored[0].name, "sec-scanner", "project skill should win equal tie")
+    assert.ok(scored[0].matchedBy.includes("scope:project"), "scope bonus should be tracked")
+    assert.equal(scored[0].score - scored[1].score, SCOPE_BONUS, `gap should equal SCOPE_BONUS (${SCOPE_BONUS})`)
+  })
+
+  it("scope bonus not applied to zero-score skills", () => {
+    const skills = [
+      { name: "project-skill", desc: "react component builder", path: "/a", scope: "project" as const },
+      { name: "global-skill", desc: "react component library", path: "/b", scope: "global" as const },
+    ]
+    const allScored = scoreSkills("kubernetes deploy", skills)
+    const projectSkill = allScored.find(s => s.name === "project-skill")!
+    assert.equal(projectSkill.score, 0, "project scope bonus must not apply when score is 0")
   })
 
   it("project skills sort before global", () => {
