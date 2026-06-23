@@ -26,6 +26,7 @@ import {
   SCOPE_BONUS,
 } from "./config.ts"
 import { escapeRegex } from "./utils.ts"
+import { cosineSimilarity } from "./embeddings.ts"
 import type { SkillEntry, ScoredSkill } from "./config.ts"
 import { createRequire } from "node:module"
 
@@ -239,5 +240,42 @@ export function scoreSkills(query: string, skills: SkillEntry[]): ScoredSkill[] 
     }
 
     return { ...skill, score, descScore, matchedBy: matched.join(", ") }
+  })
+}
+
+/**
+ * Scores all skills using semantic embedding similarity.
+ *
+ * Replaces keyword-based scoring with cosine similarity between the
+ * query embedding and each skill's embedding (computed from "name: desc").
+ * Only the scope bonus is retained — all other keyword signals (IDF, bigram,
+ * phrase, stemming) are captured by the multilingual embedding model.
+ *
+ * @param queryEmbedding - Pre-computed embedding of the user's query
+ * @param skills - Array of discovered skills
+ * @param skillEmbeddings - Map from skill path to pre-computed embedding
+ * @returns Scored skills sorted by relevance (caller should sort by score desc)
+ */
+export function scoreSkillsSemantic(
+  queryEmbedding: number[],
+  skills: SkillEntry[],
+  skillEmbeddings: Map<string, number[]>
+): ScoredSkill[] {
+  return skills.map(skill => {
+    const emb = skillEmbeddings.get(skill.path)
+    if (!emb) return { ...skill, score: 0, descScore: 0, matchedBy: "" }
+
+    let score = cosineSimilarity(queryEmbedding, emb) * 100
+
+    if (skill.scope === "project" && score > 0) {
+      score += SCOPE_BONUS
+    }
+
+    return {
+      ...skill,
+      score: Math.round(score),
+      descScore: Math.round(score),
+      matchedBy: `semantic:${Math.round(score)}`,
+    }
   })
 }

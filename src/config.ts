@@ -80,6 +80,27 @@ export const PHRASE_BONUS = 50
  */
 export const SCOPE_BONUS = 5
 
+// ── Semantic embedding constants ──────────────────────────
+
+/**
+ * Embedding model to use for semantic skill matching.
+ * Multilingual model covering 50+ languages including Chinese and English.
+ */
+export const EMBEDDING_MODEL = "Xenova/paraphrase-multilingual-MiniLM-L12-v2"
+
+/**
+ * Minimum score gap between top two semantic matches for auto-routing.
+ * Cosine similarity is scaled to 0-100, so 15 means a 0.15 cosine gap.
+ */
+export const SEMANTIC_THRESHOLD = 15
+
+/**
+ * Default minimum semantic score for ambient skill suggestion injection.
+ * Cosine similarity * 100. 25 means cosine > 0.25 before a skill appears
+ * in the suggested_skills block.
+ */
+export const AMBIENT_MIN_SEMANTIC = 25
+
 // ── Ambient suggestion constants ───────────────────────────
 
 /**
@@ -354,7 +375,7 @@ export function resolveAmbientConfig(
     ),
     ambientMinScore: pickNum(
       [options?.ambientMinScore, fileOpts?.ambientMinScore, process.env.OPENCODE_TRIAGE_MIN_SCORE],
-      AMBIENT_MIN_SCORE,
+      AMBIENT_MIN_SEMANTIC,
       { min: 0 }
     ),
     ambientMaxCandidates: pickNum(

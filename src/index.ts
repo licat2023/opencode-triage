@@ -24,9 +24,11 @@ import { tool } from "@opencode-ai/plugin"
 import { join } from "node:path"
 import { createRequire } from "node:module"
 import { buildSkillLocations, discoverAllSkills, renameSkills } from "./discovery.ts"
-import { scoreSkills } from "./scoring.ts"
+import { scoreSkillsSemantic, scoreSkills } from "./scoring.ts"
 import { suggestCorrections } from "./spellcheck.ts"
-import { checkTriageState, resolveAmbientConfig } from "./config.ts"
+import { embed, getOrComputeEmbeddings, getLoadError, preloadModelIfCached } from "./embeddings.ts"
+import type { loadModel } from "./embeddings.ts"
+import { checkTriageState, resolveAmbientConfig, AMBIENT_MIN_SEMANTIC } from "./config.ts"
 import type { SkillEntry, AmbientConfig } from "./config.ts"
 
 const require = createRequire(import.meta.url)
@@ -86,11 +88,17 @@ async function checkForUpdate(tui: any): Promise<void> {
  * as fallback for users on older OpenCode versions.
  */
 export const server: Plugin = async ({ worktree, client }, options) => {
-  // Cache: discovered skills per worktree, with timestamp for invalidation
-  // Fixes edge case #4: previously cache was never invalidated after CLI toggle,
-  // causing "skill content unavailable" errors until OpenCode restart
-  let cache: { skills: SkillEntry[]; timestamp: number } | null = null
-  const CACHE_TTL_MS = 5_000 // Re-discover every 5s to catch CLI toggles
+  // Cache: discovered skills, populated once on first call.
+  // Only invalidated by explicit rescan.
+  let cache: SkillEntry[] | null = null
+
+
+  // Embedding — preload model in background if cached on disk.
+  let embeddingModel: Awaited<ReturnType<typeof loadModel>> | null = null
+  let embeddingCache: Map<string, number[]> | null = null
+  const embeddingPreload: Promise<any | null> = preloadModelIfCached()
+    .then(m => { embeddingModel = m; return m })
+    .catch(() => null)
 
   // Rate limiting: track triage calls to prevent excessive LLM tool usage
   // Mitigates unbounded consumption attacks (LLM010)
@@ -118,62 +126,103 @@ export const server: Plugin = async ({ worktree, client }, options) => {
   }
 
   /**
-   * Returns cached skills, re-discovering if the cache has expired.
-   *
-   * Uses a time-based cache (5s TTL) to balance performance with
-   * responsiveness to file system changes (e.g., CLI toggles).
-   *
-   * @returns Array of discovered skill entries
+   * Returns cached skills. Discovers once on first call — never rescans
+   * automatically. Use the rescan tool after adding/modifying skill files.
    */
   async function getCachedSkills(): Promise<SkillEntry[]> {
-    const now = Date.now()
-    if (cache === null || now - cache.timestamp > CACHE_TTL_MS) {
+    if (cache === null) {
       const locations = buildSkillLocations(worktree)
-      cache = { skills: await discoverAllSkills(locations, getExcludedSkills), timestamp: now }
+      cache = await discoverAllSkills(locations, getExcludedSkills)
     }
-    return cache.skills
+    return cache
   }
-
-  // Cache triage state so hooks don't re-read config files on every call
-  let triageStateCache: { state: "on" | "off" | "unknown"; ts: number } | null = null
 
   /**
-   * Returns the cached triage state, re-checking if the cache has expired.
-   *
-   * @returns Current triage state: "on", "off", or "unknown"
+   * Returns pre-computed embeddings for the given skills.
+   * Embedding cache matches skill cache lifetime — only refreshed on rescan.
    */
-  async function getTriageState(): Promise<"on" | "off" | "unknown"> {
-    const now = Date.now()
-    if (triageStateCache === null || now - triageStateCache.ts > CACHE_TTL_MS) {
-      triageStateCache = { state: await checkTriageState(worktree, options), ts: now }
-    }
-    return triageStateCache.state
+  async function ensureEmbeddings(skills: SkillEntry[]): Promise<Map<string, number[]> | null> {
+    if (embeddingCache !== null) return embeddingCache
+
+    await embeddingPreload
+    if (!embeddingModel) return null
+
+    embeddingCache = await getOrComputeEmbeddings(skills, embeddingModel)
+    return embeddingCache
   }
 
-  // Ambient suggestion config, cached with the same TTL so config/env edits
-  // are picked up without restart-on-every-call overhead.
-  let ambientConfigCache: { cfg: AmbientConfig; ts: number } | null = null
-  function getAmbientConfig(): AmbientConfig {
-    const now = Date.now()
-    if (ambientConfigCache === null || now - ambientConfigCache.ts > CACHE_TTL_MS) {
-      ambientConfigCache = { cfg: resolveAmbientConfig(worktree, options), ts: now }
+  // Show semantic-unavailable toast at most once per session
+  let semanticUnavailableToastShown = false
+
+  /**
+   * Rescans the filesystem to rediscover skills and recompute embeddings.
+   * Call after adding/modifying/removing SKILL.md files.
+   */
+  async function rescanSkills(): Promise<{ discovered: number; embeddings: number }> {
+    cache = null
+    embeddingCache = null
+    const locations = buildSkillLocations(worktree)
+    const skills = await discoverAllSkills(locations, getExcludedSkills)
+    cache = skills
+    let embedCount = 0
+    if (embeddingModel) {
+      embeddingCache = await getOrComputeEmbeddings(skills, embeddingModel)
+      embedCount = embeddingCache.size
     }
-    return ambientConfigCache.cfg
+    return { discovered: skills.length, embeddings: embedCount }
+  }
+
+  let triageStateCache: "on" | "off" | "unknown" | null = null
+
+  async function getTriageState(): Promise<"on" | "off" | "unknown"> {
+    if (triageStateCache === null) {
+      triageStateCache = await checkTriageState(worktree, options)
+    }
+    return triageStateCache
+  }
+
+  // Ambient suggestion config.
+  // Computed once at startup — restart after editing opencode.json.
+  let ambientConfigCache: AmbientConfig | null = null
+  function getAmbientConfig(): AmbientConfig {
+    if (ambientConfigCache === null) {
+      ambientConfigCache = resolveAmbientConfig(worktree, options)
+    }
+    return ambientConfigCache
   }
 
   /**
    * Builds the ambient candidate block for a query, or null if nothing qualifies.
    *
-   * Scores all discovered skills, keeps those at/above the configured floor,
-   * takes the top-K, and renders a compact name+desc list that tells the model
-   * to call triage() to load the full instructions. Only name+desc is injected
-   * (never full content) to keep per-turn token cost minimal.
+   * Uses semantic embedding scoring when available. Falls back to keyword
+   * scoring if @xenova/transformers or onnxruntime-node are not installed
+   * or fail to initialize (e.g. sharp native binary can't install).
    */
   async function buildSuggestionBlock(query: string, skipNames?: Set<string>): Promise<{ block: string; names: string[] } | null> {
     const cfg = getAmbientConfig()
     const skills = await getCachedSkills()
     if (skills.length === 0) return null
-    const allScored = scoreSkills(query, skills)
+
+    const embeddings = await ensureEmbeddings(skills)
+    let allScored: ReturnType<typeof scoreSkillsSemantic> | ReturnType<typeof scoreSkills>
+    if (embeddings && embeddingModel) {
+      const queryEmbedding = await embed(embeddingModel, query)
+      allScored = scoreSkillsSemantic(queryEmbedding, skills, embeddings)
+    } else {
+      if (!semanticUnavailableToastShown) {
+        semanticUnavailableToastShown = true
+        const err = getLoadError()
+        await client.tui.showToast({
+          body: { message: err
+            ? `Semantic matching unavailable — falling back to keyword. Tip: run npm install in the triage plugin directory.`
+            : `Semantic matching unavailable — install @xenova/transformers and onnxruntime-node for cross-lingual support.`,
+            variant: "warning",
+          },
+        })
+      }
+      allScored = scoreSkills(query, skills)
+    }
+
     const scored = allScored
       .filter(s => s.score >= cfg.ambientMinScore && !skipNames?.has(s.name))
       .sort((a, b) => b.score - a.score)
@@ -280,13 +329,12 @@ export const server: Plugin = async ({ worktree, client }, options) => {
        */
       triage: tool({
          description:
-           "Discover installed skills by keyword search. " +
-           "Call this FIRST before any task to check if a specialized skill exists. " +
-           "Returns matching skill names with descriptions and relevance scores. " +
-           "To load a skill's full instructions, call skill({ name: \"<name>\" }). " +
-           "Pass a brief description of your task as the query.",
+           "Discover installed skills. Call with query: a brief task description. " +
+           "Example: triage({ query: \"backup my database\" }). " +
+           "Returns matching skill names with descriptions and scores. " +
+           "If a skill fits, call skill({ name: \"<name>\" }) to load its instructions.",
         args: {
-          query: tool.schema.string().optional().describe(
+          query: tool.schema.string().describe(
             "Brief description of what you need help with, e.g. 'backup my database'"
           ),
           toast: tool.schema.object({
@@ -324,7 +372,7 @@ export const server: Plugin = async ({ worktree, client }, options) => {
 
           const query = (args.query ?? "").trim()
           if (!query) {
-            return "Describe what you need -- triage will find the best matching skill."
+            return "Call triage with a query, e.g. triage({ query: \"backup my database\" })"
           }
 
           if (context.abort.aborted) {
@@ -360,9 +408,17 @@ export const server: Plugin = async ({ worktree, client }, options) => {
             ].join("\n")
           }
 
-          const scored = scoreSkills(query, skills)
-            .filter(s => s.score > 0)
-            .sort((a, b) => b.score - a.score)
+          const embeddings = await ensureEmbeddings(skills)
+
+          let scored: ReturnType<typeof scoreSkillsSemantic> | ReturnType<typeof scoreSkills>
+          if (embeddings && embeddingModel) {
+            const queryEmbedding = await embed(embeddingModel, query)
+            scored = scoreSkillsSemantic(queryEmbedding, skills, embeddings)
+          } else {
+            scored = scoreSkills(query, skills)
+          }
+
+          scored = scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score)
 
           if (scored.length === 0) {
             const findSkills = skills.find(s => s.name.toLowerCase() === "find-skills")
@@ -408,7 +464,7 @@ export const server: Plugin = async ({ worktree, client }, options) => {
           "Use triage instead when you have a specific task — it scores relevance.",
         args: {},
         async execute(_args, _context) {
-          const skills = await getCachedSkills()
+      const skills = await getCachedSkills()
           if (skills.length === 0) {
             return [
               "Skills provide specialized instructions and workflows for specific tasks.",
@@ -431,6 +487,19 @@ export const server: Plugin = async ({ worktree, client }, options) => {
           }
           lines.push("</available_skills>")
           return lines.join("\n")
+        },
+      }),
+      "rescan": tool({
+        description:
+          "Re-scan the filesystem to discover new, modified, or removed skills. " +
+          "Call after adding or editing SKILL.md files.",
+        args: {},
+        async execute(_args, _context) {
+          const result = await rescanSkills()
+          const embedInfo = result.embeddings > 0
+            ? `, ${result.embeddings} embedding(s) refreshed`
+            : ""
+          return `Rescan complete. ${result.discovered} skill(s) found${embedInfo}.`
         },
       }),
     },
