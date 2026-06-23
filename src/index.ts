@@ -23,10 +23,10 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import { join } from "node:path"
 import { createRequire } from "node:module"
-import { buildSkillLocations, discoverAllSkills, renameSkills, readSkillContent } from "./discovery.ts"
+import { buildSkillLocations, discoverAllSkills, renameSkills } from "./discovery.ts"
 import { scoreSkills } from "./scoring.ts"
 import { suggestCorrections } from "./spellcheck.ts"
-import { THRESHOLD, checkTriageState, resolveAmbientConfig } from "./config.ts"
+import { checkTriageState, resolveAmbientConfig } from "./config.ts"
 import type { SkillEntry, AmbientConfig } from "./config.ts"
 
 const require = createRequire(import.meta.url)
@@ -183,8 +183,7 @@ export const server: Plugin = async ({ worktree, client }, options) => {
     const block = [
       "<suggested_skills>",
       "The following installed skills may be relevant to the current message.",
-      'If one fits, call triage({ query: "<skill name>" }) to load its full instructions, then follow them.',
-      "If none are relevant, ignore this block.",
+      'If one fits, call skill({ name: "<skill name>" }) to load its full instructions, then follow them.',
       ...scored.map(s => {
         const desc = s.desc.length > 80 ? s.desc.slice(0, 77) + "..." : s.desc
         return `- ${s.name}: ${desc}`
@@ -281,21 +280,20 @@ export const server: Plugin = async ({ worktree, client }, options) => {
        */
       triage: tool({
          description:
-           "Discover and route to the right specialized skill. " +
-           "ALWAYS call this FIRST before attempting any task — check if a specialized skill exists. " +
-           "If a skill matches, read its content and check if it's scoped to a specific project (look for project names in the description or instructions). " +
-           "If the skill is project-specific and doesn't match the current project, warn the user before proceeding. " +
-           "Follow the skill's instructions when applicable, or proceed with general knowledge if not. " +
-           "Pass a brief description. Returns the best match or a list of candidates.",
-         args: {
-           query: tool.schema.string().optional().describe(
-             "Brief description of what you need help with, e.g. 'backup my database'"
-           ),
-           toast: tool.schema.object({
-             message: tool.schema.string().describe("Toast message to show to user"),
-             variant: tool.schema.enum(["info", "success", "error", "warning"]).optional().default("info").describe("Toast style"),
-           }).optional().describe("Optional: show a toast notification to the user"),
-         },
+           "Discover installed skills by keyword search. " +
+           "Call this FIRST before any task to check if a specialized skill exists. " +
+           "Returns matching skill names with descriptions and relevance scores. " +
+           "To load a skill's full instructions, call skill({ name: \"<name>\" }). " +
+           "Pass a brief description of your task as the query.",
+        args: {
+          query: tool.schema.string().optional().describe(
+            "Brief description of what you need help with, e.g. 'backup my database'"
+          ),
+          toast: tool.schema.object({
+            message: tool.schema.string().describe("Toast message to show to user"),
+            variant: tool.schema.enum(["info", "success", "error", "warning"]).optional().default("info").describe("Toast style"),
+          }).optional().describe("Optional: show a toast notification to the user"),
+        },
         async execute(args, context) {
           // Show optional toast notification
           if (args.toast) {
@@ -369,14 +367,10 @@ export const server: Plugin = async ({ worktree, client }, options) => {
           if (scored.length === 0) {
             const findSkills = skills.find(s => s.name.toLowerCase() === "find-skills")
             if (findSkills) {
-              const content = await readSkillContent(findSkills.path)
               const lines = [
-                `SKILL ROUTED: ${findSkills.name}`,
-                `Matched by: remote search fallback`,
+                `No local skill matches "${query}". Try calling skill({ name: "find-skills" }) to search remote skills.`,
               ]
               if (hint) lines.push(hint)
-              lines.push("")
-              lines.push(content)
               return lines.join("\n")
             }
             const { searchRemoteSkills, searchSuperpowers } = await import("./remote.ts")
@@ -388,53 +382,72 @@ export const server: Plugin = async ({ worktree, client }, options) => {
             return `No skill matches "${query}". Try different keywords.${hint ? "\n\n" + hint : ""}${combined}`
           }
 
-          // Confidence gap: top match vs runner-up. Large gap = clear winner
-          const gap = scored[0].score - (scored[1]?.score ?? 0)
-
-          if (gap >= THRESHOLD || scored.length === 1) {
-            const match = scored[0]
-            const content = await readSkillContent(match.path)
-            const lines = [
-              `SKILL ROUTED: ${match.name}`,
-              `Matched by: ${match.matchedBy}`,
-            ]
-            if (hint) lines.push(hint)
-            lines.push("")
-            lines.push(content)
-            return lines.join("\n")
-          }
-
-          const top = scored.slice(0, 5)
+          // Build candidate list with scores
+          const top = scored.slice(0, 8)
           const lines = [
-            `Multiple matches for "${query}". Pick one and call triage with the skill name:`,
+            scored.length === 1
+              ? `Best match for "${query}". Use skill({ name: "${scored[0].name}" }) to load it.`
+              : `Found ${scored.length} matching skill(s) for "${query}". Use skill({ name }) to load the one you need:`,
             ``,
           ]
           top.forEach((s, i) => {
-            lines.push(`${i + 1}. ${s.name} -- ${s.desc}`)
+            const desc = s.desc.length > 100 ? s.desc.slice(0, 97) + "..." : s.desc
+            lines.push(`${i + 1}. ${s.name} (score: ${s.score}) — ${desc}`)
           })
           if (hint) {
             lines.push(``)
             lines.push(hint)
           }
-          lines.push(``)
-          lines.push(`Example: triage({ query: "${top[0].name}" })`)
+          return lines.join("\n")
+        },
+      }),
+      "list-skills": tool({
+        description:
+          "List all installed skills as an <available_skills> XML block. " +
+          "Returns name and description for every skill so you can browse the full catalog. " +
+          "Use triage instead when you have a specific task — it scores relevance.",
+        args: {},
+        async execute(_args, _context) {
+          const skills = await getCachedSkills()
+          if (skills.length === 0) {
+            return [
+              "Skills provide specialized instructions and workflows for specific tasks.",
+              "Use the skill tool to load a skill when a task matches its description.",
+              "<available_skills>",
+              "  <!-- No skills installed -->",
+              "</available_skills>",
+            ].join("\n")
+          }
+          const lines = [
+            "Skills provide specialized instructions and workflows for specific tasks.",
+            "Use the skill tool to load a skill when a task matches its description.",
+            "<available_skills>",
+          ]
+          for (const s of skills) {
+            lines.push(`  <skill>`)
+            lines.push(`    <name>${s.name}</name>`)
+            lines.push(`    <description>${s.desc}</description>`)
+            lines.push(`  </skill>`)
+          }
+          lines.push("</available_skills>")
           return lines.join("\n")
         },
       }),
     },
-    // ── Skill tool override ──────────────────────────────
-    // Uses tool.definition hook to replace the built-in `skill`
-    // tool's description when triage is ON, hiding the <available_skills>
-    // block and preventing the LLM from calling it directly.
-    "tool.definition": async (input, output) => {
-      const wasHookFired = definitionHookFired
-      definitionHookFired = true
+    // ── Skill tool hook detection ────────────────────────
+    // tool.definition fires once per tool at registration time.
+    // We use it to detect hook support globally, and when the skill tool
+    // is registered we also trigger remigration if triage is ON.
+    // We do NOT override the native description — <available_skills> is
+    // a system context source (not part of tool description), stripped by
+    // system.transform independently.
+    "tool.definition": async (input, _output) => {
       hooksConfirmed = true
       if (input.toolID !== "skill") return
+      const wasHookFired = definitionHookFired
+      definitionHookFired = true
       const state = await getTriageState()
       if (state !== "on") return
-      output.description =
-        "This tool is disabled. Use `triage` to discover and load specialized skills."
       if (!wasHookFired) await remigrateIfHooksDetected()
     },
     "chat.message": async (input, output) => {
@@ -490,48 +503,25 @@ export const server: Plugin = async ({ worktree, client }, options) => {
         output.system[i] = output.system[i].replace(re, "")
       }
     },
-    // ── Skill call interception ───────────────────────────
-    // Safety net: if the LLM ignores the disabled description and
-    // calls the native `skill` tool anyway, redirect by setting the
-    // skill name to a sentinel that forces a clean "not found" error.
-    "tool.execute.before": async (input, output) => {
-      if (input.tool !== "skill") return
-      const state = await getTriageState()
-      if (state !== "on") return
-      output.args = { name: "__TRIAGE_DISABLED__" }
-    },
+    // ── Skill call passthrough ───────────────────────────
+    // Native skill() is now allowed — triage handles discovery,
+    // skill() handles loading. No interception needed.
     // ── Notification routing ────────────────────────────
     // Catches triage results to show TUI toasts.
-    // First-line pattern matching avoids parsing the full result.
-    // Body isolation prevents false positives on content issue detection.
     "tool.execute.after": async (input, output) => {
       const result = output.output
       if (typeof result !== "string") return
       if (input.tool === "triage") {
         const first = result.split("\n")[0] ?? ""
-        if (first.startsWith("SKILL ROUTED:")) {
-          const skillName = first.replace("SKILL ROUTED:", "").trim()
+        if (first.startsWith("Best match for")) {
           await client.tui.showToast({
-            body: { message: `Loaded: ${skillName}`, variant: "success" },
+            body: { message: "Skill found — load it with skill({ name })", variant: "success" },
           })
-          const bodyIndex = result.indexOf("\n\n")
-          if (bodyIndex !== -1) {
-            const body = result.slice(bodyIndex + 2).trimStart()
-            if (body.startsWith("(skill content truncated")) {
-              await client.tui.showToast({
-                body: { message: `Skill "${skillName}" exceeds 1MB limit — truncated`, variant: "warning" },
-              })
-            } else if (body.startsWith("(skill content unavailable")) {
-              await client.tui.showToast({
-                body: { message: `Could not read skill file for "${skillName}"`, variant: "error" },
-              })
-            }
-          }
-        } else if (first.startsWith("Multiple matches")) {
+        } else if (first.startsWith("Found")) {
           await client.tui.showToast({
-            body: { message: "Multiple skills matched — narrow your query", variant: "info" },
+            body: { message: "Multiple skills matched — pick one", variant: "info" },
           })
-        } else if (first.startsWith("No skill matches")) {
+        } else if (first.startsWith("No skill matches") || first.startsWith("No local skill matches")) {
           await client.tui.showToast({
             body: { message: "No matching skill found — try different keywords", variant: "error" },
           })
