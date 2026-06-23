@@ -456,7 +456,14 @@ export const server: Plugin = async ({ worktree, client }, options) => {
     "experimental.chat.messages.transform": async (_input, output) => {
       const cfg = getAmbientConfig()
       if (!cfg.autoSuggest || !_contextText) return
-      const result = await buildSuggestionBlock(_contextText, _suggested)
+      let result = await buildSuggestionBlock(_contextText, _suggested)
+      // Stale _suggested from a previous session (same process) can block all
+      // candidates because buildSuggestionBlock filters out every name it contains.
+      // When that happens, clear the stale dedup set and retry once.
+      if (!result && _suggested.size > 0) {
+        _suggested = new Set()
+        result = await buildSuggestionBlock(_contextText, _suggested)
+      }
       if (!result) return
       for (const n of result.names) _suggested.add(n)
       const msgs = output.messages ?? []
