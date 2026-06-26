@@ -1,7 +1,7 @@
 /*
  * opencode-triage — Skill Router Plugin
  * ======================================
- * Version: 1.3.0
+ * Version: 1.3.3
  * License: MIT
  *
  * Deterministic skill routing for OpenCode. Registers a `triage()` custom tool
@@ -9,10 +9,10 @@
  * keyword scoring.
  *
  * Layers of defense (no file renaming needed when hooks are available):
- *   1. tool.definition    — replaces built-in `skill` tool description
- *   2. system.transform   — strips <available_skills> from system prompt
- *   3. tool.execute.before — intercepts stray skill() calls
- *   4. File rename        — CLI fallback when hooks not supported
+ *   1. tool.definition      — detects hook support, triggers remigration
+ *   2. system.transform     — strips <available_skills> from system prompt
+ *   3. tool.execute.after   — routes triage results to TUI toasts
+ *   4. File rename          — CLI fallback when hooks not supported
  *
  * Install:  { "plugin": ["opencode-triage"] }  in opencode.json
  * Toggle:   /triage on   |   /triage off
