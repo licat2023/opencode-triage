@@ -77,7 +77,7 @@ export function suggestCorrections(query: string, skills: SkillEntry[]): string[
   // Check each query word against vocabulary
   const hints: string[] = []
   for (const word of words) {
-    const hasExactMatch = [...vocab].some(v => v === word)
+    const hasExactMatch = vocab.has(word)
     if (!hasExactMatch && word.length >= 4) {
       let best = ""
       let bestDist = Infinity
