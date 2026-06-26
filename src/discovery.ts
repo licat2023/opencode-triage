@@ -114,7 +114,7 @@ export async function discoverAllSkills(
  * @param skillDir - Absolute path to a skill subdirectory
  * @returns Parsed skill entry (without scope), or null if neither file exists
  */
-async function tryReadSkill(
+export async function tryReadSkill(
   skillDir: string
 ): Promise<Omit<SkillEntry, "scope"> | null> {
   const filenames = ["SKILL.md", "SKILL.md.disabled"]
