@@ -39,12 +39,6 @@ catch { CURRENT_VERSION = "0.0.0" }
 const WORKTREE = findProjectRoot(process.cwd())
 const HOMEDIR = os.homedir()
 
-const CMD_TEMPLATE = `---
-description: Toggle, inspect, and benchmark the triage skill router
----
-Run npx -y opencode-triage $ARGUMENTS and show the output verbatim.
-If output contains "Restart opencode", tell the user to restart.
-`
 const LOCAL_CFG_PATH  = path.join(WORKTREE, ".opencode", "opencode.json")
 const LOCAL_CMD_DIR   = path.join(WORKTREE, ".opencode", "commands")
 const LOCAL_CMD_FILE  = path.join(LOCAL_CMD_DIR, "triage.md")
@@ -390,69 +384,6 @@ function writeTriageState(configPath, enable) {
   fs.mkdirSync(path.dirname(configPath), { recursive: true })
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8")
   if (!isQuiet) console.log(`Config:    autoHide=${enable} → ${configPath}`)
-}
-
-function updateLocalConfig(enable) {
-  let config = {}
-  let hadPlugin = false
-  try {
-    const raw = fs.readFileSync(LOCAL_CFG_PATH, "utf-8")
-    config = JSON.parse(stripJsoncComments(raw))
-    hadPlugin = (config.plugin || []).some(isTriageEntry)
-  } catch {
-    config = { "$schema": "https://opencode.ai/config.json" }
-  }
-  config.plugin = config.plugin || []
-  const idx = findTriageIndex(config.plugin)
-  if (enable && !hadPlugin) {
-    config.plugin.push(PLUGIN_NAME)
-    if (!isQuiet) console.log(`Config:    added to ${LOCAL_CFG_PATH}`)
-  } else if (!enable && hadPlugin) {
-    config.plugin.splice(idx, 1)
-    if (!isQuiet) console.log(`Config:    removed from ${LOCAL_CFG_PATH}`)
-  }
-  fs.mkdirSync(path.dirname(LOCAL_CFG_PATH), { recursive: true })
-  fs.writeFileSync(LOCAL_CFG_PATH, JSON.stringify(config, null, 2) + "\n", "utf-8")
-}
-
-function updateGlobalConfig(enable) {
-  if (!fs.existsSync(GLOBAL_CFG_PATH)) {
-    if (!enable) return
-    const config = { "$schema": "https://opencode.ai/config.json", plugin: [PLUGIN_NAME] }
-    fs.mkdirSync(path.dirname(GLOBAL_CFG_PATH), { recursive: true })
-    fs.writeFileSync(GLOBAL_CFG_PATH, JSON.stringify(config, null, 2) + "\n", "utf-8")
-    if (!isQuiet) console.log(`Config:    created ${GLOBAL_CFG_PATH} with plugin`)
-    return
-  }
-  const raw = fs.readFileSync(GLOBAL_CFG_PATH, "utf-8")
-  let config
-  try {
-    config = JSON.parse(raw)
-  } catch {
-    const stripped = stripJsoncComments(raw)
-    try {
-      config = JSON.parse(stripped)
-    } catch {
-      console.error(`Could not parse ${GLOBAL_CFG_PATH} — skipping plugin toggle`)
-      return
-    }
-  }
-  config.plugin = config.plugin || []
-  const hadPlugin = config.plugin.some(isTriageEntry)
-  const idx = findTriageIndex(config.plugin)
-  if (enable) {
-    if (!hadPlugin) {
-      config.plugin.push(PLUGIN_NAME)
-      fs.writeFileSync(GLOBAL_CFG_PATH, JSON.stringify(config, null, 2) + "\n", "utf-8")
-      if (!isQuiet) console.log(`Config:    added to ${GLOBAL_CFG_PATH}`)
-    }
-  } else {
-    if (hadPlugin) {
-      config.plugin.splice(idx, 1)
-      fs.writeFileSync(GLOBAL_CFG_PATH, JSON.stringify(config, null, 2) + "\n", "utf-8")
-      if (!isQuiet) console.log(`Config:    removed from ${GLOBAL_CFG_PATH}`)
-    }
-  }
 }
 
 function updatePluginConfigMode(configPath, mode) {
