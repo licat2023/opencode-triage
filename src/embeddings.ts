@@ -15,7 +15,7 @@
 
 import { join, dirname } from "node:path"
 import { homedir } from "node:os"
-import { mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { readFile, writeFile, stat, mkdir } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import type { SkillEntry } from "./config.ts"
@@ -36,6 +36,8 @@ let _loadError: string | null = null
 
 function stubBrokenSharp() {
   const sharpDir = join(__nodeModules, "sharp")
+  if (!existsSync(sharpDir)) return
+
   const sharpLib = join(sharpDir, "lib")
   const pkgPath = join(sharpDir, "package.json")
   const constructorPath = join(sharpLib, "constructor.js")
