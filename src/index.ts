@@ -306,6 +306,17 @@ export const server: Plugin = async ({ worktree, client }, options) => {
   let _contextText = ""
   let _suggested = new Set<string>()
 
+  // Active skill tracking.
+  // _activeSkills holds the full <skill_content> XML of skills loaded via the
+  // native skill() tool. Content is injected into the system prompt on every
+  // LLM request so the model can reference it without keeping it in history.
+  interface ActiveSkill {
+    content: string
+    directory: string
+    loadedAt: number
+  }
+  const _activeSkills = new Map<string, ActiveSkill>()
+
   return {
     tool: {
       /**
@@ -500,6 +511,22 @@ export const server: Plugin = async ({ worktree, client }, options) => {
           return `Rescan complete. ${result.discovered} skill(s) found${embedInfo}.`
         },
       }),
+      "unload-skill": tool({
+        description:
+          "Unload a previously activated skill from the system prompt to free context space. " +
+          "Call this when you no longer need a skill's instructions, the task has shifted, " +
+          "or the active skill list is too large.",
+        args: {
+          name: tool.schema.string().describe("The name of the skill to unload"),
+        },
+        async execute(args) {
+          if (!args.name) return "Specify a skill name to unload, e.g. unload-skill({ name: \"my-skill\" })"
+          if (_activeSkills.delete(args.name)) {
+            return `Skill "${args.name}" unloaded. It is no longer active in the system prompt.`
+          }
+          return `Skill "${args.name}" is not currently loaded. Active skills: ${[..._activeSkills.keys()].join(", ") || "none"}`
+        },
+      }),
     },
     // ── Skill tool hook detection ────────────────────────
     // tool.definition fires once per tool at registration time.
@@ -532,10 +559,11 @@ export const server: Plugin = async ({ worktree, client }, options) => {
 
     // ── System prompt injection ────────────────────────────
     // experimental.chat.system.transform fires on every LLM request step.
-    // Two responsibilities:
+    // Three responsibilities:
     //   1. Strip native <available_skills> XML (belt-and-suspenders)
-    //   2. Inject ambient <suggested_skills> via _contextText
-    // Both are ephemeral — never persisted to conversation history.
+    //   2. Inject active skills into system prompt
+    //   3. Inject ambient <suggested_skills> via _contextText (if autoSuggest on)
+    // All are ephemeral — never persisted to conversation history.
     "experimental.chat.system.transform": async (_input, output) => {
       const state = await getTriageState()
       if (state !== "on") return
@@ -545,6 +573,15 @@ export const server: Plugin = async ({ worktree, client }, options) => {
       const re = /<available_skills>[\s\S]*?<\/available_skills>/g
       for (let i = 0; i < output.system.length; i++) {
         output.system[i] = output.system[i].replace(re, "")
+      }
+
+      // Inject active skills into system prompt
+      if (_activeSkills.size > 0) {
+        const blocks: string[] = []
+        for (const [name, skill] of _activeSkills) {
+          blocks.push(skill.content)
+        }
+        output.system.push("<active_skills>\n" + blocks.join("\n\n") + "\n</active_skills>")
       }
 
       // Inject ambient suggestions
@@ -561,14 +598,36 @@ export const server: Plugin = async ({ worktree, client }, options) => {
       for (const n of result.names) _suggested.add(n)
       output.system.push(result.block)
     },
-    // ── Skill call passthrough ───────────────────────────
-    // Native skill() is now allowed — triage handles discovery,
-    // skill() handles loading. No interception needed.
+    // ── Skill activation / system prompt injection ──────
+    // When the native skill() tool is called, intercept the result:
+    //   1. Store the full <skill_content> in _activeSkills
+    //   2. Replace the tool output with a brief confirmation
+    //   3. Subsequent turns get the content via system.transform
     // ── Notification routing ────────────────────────────
     // Catches triage results to show TUI toasts.
     "tool.execute.after": async (input, output) => {
       const result = output.output
       if (typeof result !== "string") return
+
+      // Intercept native skill tool — capture content into system prompt
+      if (input.tool === "skill") {
+        const name = (input.args as any)?.name
+        if (name && typeof name === "string") {
+          _activeSkills.set(name, {
+            content: result,
+            directory: output.metadata?.dir ?? "",
+            loadedAt: Date.now(),
+          })
+          output.title = `Skill "${name}" activated`
+          output.output = [
+            `Skill "${name}" activated. Its instructions are now available in the system prompt for ongoing reference.`,
+            ``,
+            `Use unload-skill({ name: "${name}" }) when you no longer need it to free context space.`,
+          ].join("\n")
+        }
+        return
+      }
+
       if (input.tool === "triage") {
         const first = result.split("\n")[0] ?? ""
         if (first.startsWith("Best match for")) {
