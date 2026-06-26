@@ -303,10 +303,8 @@ export const server: Plugin = async ({ worktree, client }, options) => {
   // Context accumulation for ambient scoring. _contextText accumulates all
   // message text within a single user turn (reset on each user message).
   // _suggested tracks skill names already injected this turn for dedup.
-  // _firstInsert controls inject position: prepend on first, append on later.
   let _contextText = ""
   let _suggested = new Set<string>()
-  let _firstInsert = false
 
   return {
     tool: {
@@ -523,7 +521,7 @@ export const server: Plugin = async ({ worktree, client }, options) => {
       const cfg = getAmbientConfig()
       if (!cfg.autoSuggest) return
       const isUser = input.info?.type === "user" || input.info?.role === "user"
-      if (isUser) { _contextText = ""; _suggested = new Set(); _firstInsert = false }
+      if (isUser) { _contextText = ""; _suggested = new Set() }
       const text = (output.parts ?? [])
         .filter((p: any) => p?.type === "text" && typeof p.text === "string" && !p.synthetic)
         .map((p: any) => p.text as string)
@@ -531,46 +529,37 @@ export const server: Plugin = async ({ worktree, client }, options) => {
         .trim()
       if (text) _contextText += (_contextText ? " " : "") + text
     },
-    // ── Ephemeral suggestion injection ──────────────────────
-    // experimental.chat.messages.transform fires on every LLM request step.
-    // Injected parts are visible to the LLM for this turn only — output.messages
-    // is re-fetched from DB each iteration, so mutations never persist.
-    "experimental.chat.messages.transform": async (_input, output) => {
+
+    // ── System prompt injection ────────────────────────────
+    // experimental.chat.system.transform fires on every LLM request step.
+    // Two responsibilities:
+    //   1. Strip native <available_skills> XML (belt-and-suspenders)
+    //   2. Inject ambient <suggested_skills> via _contextText
+    // Both are ephemeral — never persisted to conversation history.
+    "experimental.chat.system.transform": async (_input, output) => {
+      const state = await getTriageState()
+      if (state !== "on") return
+      if (!migrationCompleted) await remigrateIfHooksDetected()
+
+      // Strip native <available_skills>
+      const re = /<available_skills>[\s\S]*?<\/available_skills>/g
+      for (let i = 0; i < output.system.length; i++) {
+        output.system[i] = output.system[i].replace(re, "")
+      }
+
+      // Inject ambient suggestions
       const cfg = getAmbientConfig()
       if (!cfg.autoSuggest || !_contextText) return
       let result = await buildSuggestionBlock(_contextText, _suggested)
       // Stale _suggested from a previous session (same process) can block all
       // candidates because buildSuggestionBlock filters out every name it contains.
-      // When that happens, clear the stale dedup set and retry once.
       if (!result && _suggested.size > 0) {
         _suggested = new Set()
         result = await buildSuggestionBlock(_contextText, _suggested)
       }
       if (!result) return
       for (const n of result.names) _suggested.add(n)
-      const msgs = output.messages ?? []
-      const part = { type: "text", text: result.block, synthetic: true } as any
-      if (!_firstInsert) {
-        _firstInsert = true
-        const lastUser = [...msgs].reverse().find((m: any) => m.info?.type === "user" || m.info?.role === "user")
-        if (lastUser) {
-          lastUser.parts.unshift(part)
-          return
-        }
-      }
-      msgs.push({ info: { type: "user", role: "user" }, parts: [part] } as any)
-    },
-    // ── System prompt cleanup ─────────────────────────────
-    // Strips the <available_skills> XML block from the system prompt
-    // as a belt-and-suspenders measure alongside tool.definition.
-    "experimental.chat.system.transform": async (_input, output) => {
-      const state = await getTriageState()
-      if (state !== "on") return
-      if (!migrationCompleted) await remigrateIfHooksDetected()
-      const re = /<available_skills>[\s\S]*?<\/available_skills>/g
-      for (let i = 0; i < output.system.length; i++) {
-        output.system[i] = output.system[i].replace(re, "")
-      }
+      output.system.push(result.block)
     },
     // ── Skill call passthrough ───────────────────────────
     // Native skill() is now allowed — triage handles discovery,
